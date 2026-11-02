@@ -600,7 +600,7 @@ iOS 和 Android 上，引擎运行在系统要求的隧道进程里：Android �
 - **应用**：照旧读更新源，把安装包下载到自己的缓存目录，在下面两种时机发 `InstallUpdate`，绝不断开连接。失败计数、回退到提示、界面文案都在应用这边（#548）。
   - **退出时**：用户退出应用，`relaunch=false`（重新打开用户刚关掉的应用会让人意外）。应用先立刻隐藏窗口和托盘图标，再等回答；没有回答也照常退出。
   - **空闲时**：没有连接，也没有打开的窗口，只剩托盘图标。`relaunch=true`，应用收到 `accepted` 后退出。重新打开时不带参数，回到只有托盘图标的状态由应用自己处理。
-- **服务**：把安装包复制到只有它能写的目录，在副本上做全部核验，等发请求的应用进程退出后安装，按需要重新打开应用，再换上新版本自己的服务。它不访问网络，也不读更新源。
+- **服务**：把安装包复制到只有它能写的目录，在副本上做全部核验，等发请求的应用进程退出后安装应用并换上新版本自己的服务，完成后按需要重新打开应用。它不访问网络，也不读更新源。
 - **核验不依赖应用**：请求只能来自通过客户端身份核验的应用（`docs/security.md`），但服务不因此信任请求里的文件和版本：签名、长度和版本都在副本上自己核对。
 
 ### 16.2 请求
@@ -618,7 +618,7 @@ iOS 和 Android 上，引擎运行在系统要求的隧道进程里：Android �
 
 安装包和签名的来源：
 
-- **Windows**：appcast 和频道指针里现有的 `setup.exe` 及其 `ed_signature`、`length`，安装参数是 `/S`。
+- **Windows**：appcast 和频道指针里现有的 `setup.exe` 及其 `ed_signature`、`length`，服务调用的[安装程序](../apps/flutter/README.md#windows-installer)参数是 `/S /SERVICEUPDATE`（行为见 16.4）。
 - **macOS**：Sparkle 现在用的 DMG 不变（手动"检查更新…"和回退还用它）。静默更新用 `.pkg`。发布已经给 pkg 签 Developer ID Installer、公证并装订公证票据（`package-app.sh`），这里另需：给 pkg 也做 EdDSA 签名，频道指针 `desktop/channels/stable.json` 的 macOS 平台项另加 `install_file`、`install_url`、`install_length`、`install_ed_signature`（发布元数据里已有 `install_file`、`install_length`）。这项发布改动和服务一起做，在服务之前合入。
 
 ### 16.3 服务的处理
@@ -643,13 +643,15 @@ iOS 和 Android 上，引擎运行在系统要求的隧道进程里：Android �
 
 **回答之前连接断了**（应用退出、崩溃或不再等待）：丢弃这次请求，删掉副本，不安装，也不记结果。所以对应用来说，没有收到 `accepted` 就等于没装。
 
+**更新期间的新连接**：核验、等待应用退出和安装期间，新的 `Connect` 返回 `UPDATE_IN_PROGRESS`，不启动核心。更新检查与 `Connect` 都先取更新锁 `ACTIVE`、再取核心锁 `CORE`，`Connect` 持有更新锁直到核心启动调用结束。服务被替换后，独立安装进程仍持有 `current/lock` 时也拒绝连接；锁的打开或检查出错时同样拒绝，只有锁文件不存在或能取得锁时才继续。
+
 ### 16.4 安装
 
 - **独立进程**：安装由服务另起的进程执行，不在服务的 launchd 作业或 Windows 服务进程里，所以服务在安装中被停止、替换都不影响它。
 - **等应用退出**：等的是这条连接的对端进程，不用 payload 里的任何值：macOS 从连接的 audit token 取，Windows 用 `GetNamedPipeClientProcessId` 再打开一个进程句柄。等待挂在这个 audit token 或句柄上，在回答之前、连接还在时打开，所以 PID 被复用也不会认错；打不开就以 `UPDATE_INSTALL_FAILED` 回答，不接受。最多等 60 秒，还没退出就记为失败（`UPDATE_CLIENT_STILL_RUNNING`），不装。退出后再查一次没有运行中的核心，有则记为 `UPDATE_BUSY`。
 - **安装**：
-  - macOS：`installer -pkg <副本> -target /`。pkg 的 postinstall 照旧把应用包交给控制台用户。成功后按 `docs/security.md` 的规则核对新应用包里的 `ppvpn-service-install`，再运行它换上新版本的服务（它会停掉旧服务，所以也在独立进程里）。
-  - Windows：`<副本> /S`。安装程序自己停止、替换并重启服务。它以 SYSTEM 运行，不会自己重新打开应用。
+  - macOS：先用 `pkgutil --expand-full` 把已核验的副本展开到私有暂存目录 `current/payload`，从其中的 `Payload/PPVPN.app/Contents/MacOS` 把 `ppvpn-service-install` 和 `ppvpn-service` 复制到 `current/new`。helper 及其到 payload 根目录之间的目录都不能是符号链接；两个副本都按 `docs/security.md` 的规则核对 Developer ID、各自标识和 hardened runtime。通过后才执行 `installer -pkg <副本> -target /`，再运行 `current/new/ppvpn-service-install` 换上新服务。pkg 的 postinstall 照旧把应用包交给控制台用户，安装进程始终使用先前准备好的私有 helper 副本。
+  - Windows：`<副本> /S /SERVICEUPDATE`。安装程序先用 `tasklist` 检查是否还有 `ppvpn.exe`（包括其他会话）；有则以退出码 2 拒绝，枚举失败也拒绝，这时还没有停代理或服务。通过后才停止、替换并重启服务。这个模式不发应用退出事件、不终止其他应用实例，也不由安装程序重新打开应用或推送代理；重新打开由独立安装进程按下一条处理。
   - 安装上限 10 分钟，超时结束安装进程，记为失败。
 - **重新打开**：只在 `relaunch=true` 时，在应用原来所属的用户会话里打开应用，没有额外参数：macOS 用该用户的 `launchctl asuser`，Windows 用该会话的用户令牌（`WTSQueryUserToken`），以普通完整性级别运行。安装成功打开新版本，失败打开旧版本，让用户回到原来的状态。`relaunch=false` 时成功和失败都不打开。推送代理按应用启动时的规则恢复。
 - **睡眠和注销**：
@@ -662,7 +664,7 @@ iOS 和 Android 上，引擎运行在系统要求的隧道进程里：Android �
 - `GetVersion` 的应答加三个字段（老版本的服务没有，应用当作"不支持静默更新"）：
   - `build`：服务自己的构建号。
   - `update`：正在进行的安装，没有时为 null：`{ "version", "build", "phase": "waiting" | "installing" }`。`waiting` 是在等应用退出，`installing` 是安装程序在运行。安装最长 10 分钟，这期间用户可能手动打开旧版本的应用；应用看到这个字段就显示"正在安装更新"，不连接，然后退出。
-  - `last_update`：最近一次结果，没有时为 null：`{ "version", "build", "outcome": "installed" | "failed", "error", "finished_at_ms" }`。它只记录给出 `accepted` 之后的结果，写在暂存目录里，服务重启后仍在。`error` 是 16.4 的错误码，或 `UPDATE_INSTALL_FAILED`（附安装程序的退出码）。
+  - `last_update`：最近一次结果，没有时为 null：`{ "version", "build", "outcome": "installed" | "failed", "error", "finished_at_ms" }`。它只记录给出 `accepted` 之后的结果，写在暂存目录里，服务重启后仍在。`error` 是 16.4 的错误码，或 `UPDATE_INSTALL_FAILED`（附包展开、helper 核验或安装程序的失败原因，包括退出码）。
 - **应用怎么用**：
   - 按 `finished_at_ms` 去重，同一个结果只处理一次。
   - `outcome` 是 `installed`，并且 `build` 等于应用自己的构建号：显示一次"已更新到 PPVPN {v}"。

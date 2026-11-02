@@ -80,10 +80,18 @@ Profile 可能由宿主暂存以完成进程间交接，但这属于宿主责任
     所以父目录和它本身都要归 SYSTEM 或 Administrators 所有、不是重解析点；本目录新建时就带只含 SYSTEM 和
     Administrators 的受保护 DACL，已有的就重设成这样。不满足时以 `UPDATE_UNSUPPORTED` 拒绝。每次用之前删掉
     旧的 `current`、重新建，新建失败就放弃，不用别的进程建的目录。
+  - 核验、等待应用退出和安装期间，`Connect` 以 `UPDATE_IN_PROGRESS` 拒绝。更新检查与核心启动按
+    `ACTIVE` → `CORE` 的顺序互斥；服务被替换后，独立安装进程持有的 `current/lock` 仍会阻止新连接，
+    打开或检查锁失败时也拒绝连接。
   - 安装进程是复制到暂存目录里的服务程序，不在服务的进程组（macOS `setsid`）或控制台里，所以安装停掉服务时
-    它不受影响。macOS 安装 pkg 之后，按上面的规则换上新服务：把新应用包里的 `ppvpn-service-install` 和
-    `ppvpn-service` 复制到暂存目录，核对副本满足标识为 `com.peakpassvpn.ppvpn.service-install` 的要求，
-    再以 root 运行副本。
+    它不受影响。macOS 先把已核验的 pkg 展开到私有的 `current/payload`，从其中的
+    `Payload/PPVPN.app/Contents/MacOS` 复制 `ppvpn-service-install` 和 `ppvpn-service` 到 `current/new`。
+    helper 必须是普通文件，到 payload 根目录之间的每个目录都不能是符号链接；两个副本分别满足标识为
+    `com.peakpassvpn.ppvpn.service-install` 和 `com.peakpassvpn.ppvpn.service` 的 Developer ID 要求，
+    Team ID 来自 `macos_team_id`，并启用 hardened runtime。全部通过后才安装 pkg，再以 root 运行私有的
+    install helper 副本。postinstall 把应用包交给用户之后，helper 的来源仍是已核验的私有 payload。
+  - Windows 安装参数为 `/S /SERVICEUPDATE`：还有任何 `ppvpn.exe` 或进程枚举失败时，安装程序在停服务和
+    代理之前退出，不终止其他应用实例；此模式也关闭安装程序自身的应用和代理重新打开逻辑。
   - 重新打开应用用原来那个用户的身份：macOS 用 `launchctl asuser` 加 `sudo -u`，Windows 用该会话的用户令牌，
     不以 root/SYSTEM 运行应用。
 - 每次启动轮换至少 256 bit 随机会话密钥；Unix 交换文件为 `0600`。

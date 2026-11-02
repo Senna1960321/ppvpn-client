@@ -110,6 +110,15 @@ L1 和 L2 只跑一遍（`unit`、`integration`）；`macos`、`windows` 不重�
 | `ppvpn-core` | `hostipv6::darwin`、`localdns::source`、`probe::icmp`、`runtime::sail_tests`（Sail 的网卡监视器按平台实现，整个模块在 macOS 上再跑一遍） | `hostipv6::windows`、`localdns::source`、`probe::icmp`；`runtime::windows_tests`（feature `fault-injection`，管理员，G7 Windows） |
 | `ppvpn-cli` | `identity`；`--test keystore`（登录钥匙串，`PPVPN_TEST_KEYSTORE=1`） | 不支持 Windows |
 | `ppvpn-client` | `detect`、`service`、`sysproxy` | `detect`、`service`、`sysproxy` |
+| `ppvpn-service`（`--bin ppvpn-service`） | `macsign`（`PPVPN_TEST_CODESIGN=1`）、`update::` | `update::` |
+
+服务的更新测试可单独运行：`cargo test --locked -p ppvpn-service --bin ppvpn-service -- update::`。
+`update_guard_tests.rs` 覆盖更新各阶段拒绝 `Connect`、服务重启后安装进程的文件锁、核心启动与更新竞争、
+取消和连接失败后的锁释放，以及锁检查出错时拒绝连接。macOS 上的 `update_macos_package_tests.rs` 用
+系统的 `cc`、`pkgbuild`、`pkgutil` 制作并展开真实的临时 pkg，检查 helper 字节和可执行权限、签名拒绝、
+helper 及上层目录的符号链接拒绝、损坏包的拒绝；只调用 helper 准备函数，不执行安装程序，不需要 root。
+使用正式签名的 macOS 更新安装、服务替换，以及 Windows `/SERVICEUPDATE` 在 SYSTEM 下对其他会话应用的
+拒绝和应用/代理重新打开行为，仍需在隔离的原生系统上验收；NSIS 编译只验证安装脚本可以生成安装程序。
 
 ### 缓存
 
