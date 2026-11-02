@@ -12,7 +12,7 @@ import unittest
 
 import android_release as apk
 import update_site as site
-from update_site_test import DOWNLOAD, SITE, release
+from update_site_test import DOWNLOAD, SITE, package_name, release
 
 
 SIGNER = "ab" * 32
@@ -126,7 +126,7 @@ class AndroidRelease(unittest.TestCase):
 
     def test_valid_apk_is_copied_and_linked_by_real_site_builder(self):
         self.package()
-        release(self.out)
+        release(self.out, packages="signed")
         web = self.root / "site"
         files = site.build(str(self.out), "v0.4.0", "stable", DOWNLOAD, SITE + "/prefix", str(web),
                            installers_on_site=True)
@@ -136,8 +136,16 @@ class AndroidRelease(unittest.TestCase):
         pointer = json.loads((web / "android/stable/latest.json").read_text())
         self.assertEqual(pointer, {**self.metadata(), "url": SITE + "/prefix/" + relative})
         self.assertEqual((web / relative).read_bytes(), self.input.read_bytes())
+        desktop_pointer = json.loads((web / "desktop/channels/stable.json").read_text())
+        for platform in site.SILENT:
+            package = package_name(platform)
+            package_relative = f"desktop/stable/0.4.0/1234/{package}"
+            self.assertIn(package_relative, files)
+            self.assertEqual((web / package_relative).read_bytes(), (self.out / package).read_bytes())
+            self.assertEqual(desktop_pointer["platforms"][platform]["install_url"],
+                             SITE + "/prefix/" + package_relative)
         # Exercise the actual workflow's rehearsal copy step as well: normal
-        # release downloads and rehearsal staging must carry the same APK.
+        # release downloads and rehearsal staging must carry both APK and PKGs.
         workflow = (Path(__file__).resolve().parents[3] / ".github/workflows/release.yml").read_text()
         step = workflow.split("      - name: The rehearsal's release\n", 1)[1]
         body = step.split("        run: |\n", 1)[1]
@@ -155,10 +163,17 @@ class AndroidRelease(unittest.TestCase):
                                 env={**os.environ, "SITE_BASE": SITE, "TAG": "v0.4.0",
                                      "GITHUB_ENV": str(self.root / "github-env")})
         self.assertEqual(result.returncode, 0, result.stderr)
+        for name in (self.metadata()["file"], *(package_name(platform) for platform in site.SILENT)):
+            self.assertEqual((self.root / "newest" / name).read_bytes(), (self.out / name).read_bytes())
         rehearsal = self.root / "rehearsal-site"
-        site.build(str(self.root / "newest"), "v0.4.0", "stable", DOWNLOAD, SITE, str(rehearsal),
-                   installers_on_site=True)
+        rehearsal_files = site.build(str(self.root / "newest"), "v0.4.0", "stable", DOWNLOAD, SITE,
+                                     str(rehearsal), installers_on_site=True)
+        self.assertEqual(rehearsal_files, files)
         self.assertEqual((rehearsal / relative).read_bytes(), self.input.read_bytes())
+        for platform in site.SILENT:
+            package = package_name(platform)
+            package_relative = f"desktop/stable/0.4.0/1234/{package}"
+            self.assertEqual((rehearsal / package_relative).read_bytes(), (self.out / package).read_bytes())
 
     def test_bad_apk_prevents_all_desktop_and_android_site_writes(self):
         self.package()
