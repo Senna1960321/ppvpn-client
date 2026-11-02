@@ -209,7 +209,7 @@ pub async fn probe_availability(&self, request: ProbeAvailabilityRequest) -> Res
 ```
 
 - **语义**：和 Core API v1 相同（`docs/architecture.md` 的"探测语义"一节）。
-- **入口探测**：直连测每个入口，不经隧道的规则。需要已 apply 的 Profile（否则 `PROFILE_NOT_APPLIED`），不需要已 start；每个节点发一个 `EntranceProbed`。
+- **入口探测**：直连测每个入口，不经隧道的规则。每个入口连续采样 3 次，`latency_ms` 取最快的一次（#549 之前只测一次）；耗时因此约为原来的 3 倍，仍在 `timeout_ms` 之内。需要已 apply 的 Profile（否则 `PROFILE_NOT_APPLIED`），不需要已 start；每个节点发一个 `EntranceProbed`。
 - **可用性探测**：请求经该节点的出口发出，也就是该节点的本地代理用户所去的地方，但不经本地代理的监听，所以不受本地代理端口的影响（Go 版经本地代理用户发出）。每次探测发一个 `AvailabilityProbed`。
   - **前置检查的顺序同 Go**：实例没有本地代理 → `LOCAL_PROXY_DISABLED`（retryable=false）；没有 apply → `PROFILE_NOT_APPLIED`（retryable=false）；没有 start → `CORE_NOT_RUNNING`（retryable=true）；之后才检查离线和节点（`NODE_NOT_FOUND`）。
   - **TUN 实例**：始终返回 `LOCAL_PROXY_DISABLED`，不论是否在运行（Core 组决定，同 Go）。
