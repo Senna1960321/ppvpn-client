@@ -33,6 +33,7 @@ mod routing;
 mod saved_profile;
 mod service;
 mod session;
+pub mod silent_update;
 mod standard;
 mod storage;
 mod sysproxy;

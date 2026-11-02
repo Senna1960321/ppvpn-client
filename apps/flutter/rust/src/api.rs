@@ -709,3 +709,65 @@ pub fn check_for_updates() {
 pub fn set_auto_check_updates(enabled: bool) -> Result<(), String> {
     crate::update::set_auto_check(enabled)
 }
+
+/// The service's side of silent updates (#548), at launch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UiSilentUpdate {
+    /// The service installs updates silently (macOS and Windows, a release
+    /// build, a service of 0.7.5 or later).
+    pub available: bool,
+    /// The service is installing one now: the app says so and quits
+    /// (docs/host-integration.md section 16.5).
+    pub installing: bool,
+    /// This build was just installed silently: 「已更新到 PPVPN {v}」, once.
+    pub updated_to: Option<String>,
+}
+
+/// The channel's release, after [`silent_update_prepare`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UiSilentPrepared {
+    UpToDate,
+    /// Downloaded and checked: installed when the app quits or is idle.
+    Ready,
+    /// No silent update for it (no package, or three failures): Sparkle's
+    /// or WinSparkle's prompt.
+    Prompt,
+    /// The pointer or the download failed: try again later.
+    Later,
+}
+
+/// Reads the service's state, and handles its last result once (the
+/// failures it counts, the notice).
+pub async fn silent_update_state() -> Result<UiSilentUpdate, String> {
+    bridge::get()?.run(crate::silent::state()).await
+}
+
+/// Checks the channel and downloads a newer package.
+pub async fn silent_update_prepare() -> Result<UiSilentPrepared, String> {
+    bridge::get()?.run(crate::silent::prepare()).await
+}
+
+/// Hands the downloaded package to the service: true when it accepted it,
+/// and the app must now exit. With `relaunch` (idle, not at quit) the
+/// service opens the app again, in the tray.
+pub async fn silent_update_install(relaunch: bool) -> Result<bool, String> {
+    bridge::get()?.run(crate::silent::install(relaunch)).await
+}
+
+/// The 「自动更新」 switch; `None` before it was first set.
+#[frb(sync)]
+pub fn auto_update() -> Option<bool> {
+    crate::silent::auto_update()
+}
+
+#[frb(sync)]
+pub fn set_auto_update(enabled: bool) {
+    crate::silent::set_auto_update(enabled);
+}
+
+/// The service opened the app again after an idle install: it starts in
+/// the tray. Clears the mark.
+#[frb(sync)]
+pub fn take_start_hidden() -> bool {
+    crate::silent::take_start_hidden()
+}
