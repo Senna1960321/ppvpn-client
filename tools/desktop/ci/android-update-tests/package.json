@@ -1,0 +1,12 @@
+{
+  "name": "ppvpn-android-release-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test workflow.test.mjs"
+  },
+  "devDependencies": {
+    "@actions/expressions": "0.3.61",
+    "yaml": "2.9.1"
+  }
+}

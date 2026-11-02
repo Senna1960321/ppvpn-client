@@ -58,6 +58,8 @@ import sys
 from email.utils import format_datetime
 from xml.sax.saxutils import escape, quoteattr
 
+import android_release
+
 PLATFORMS = ("macos-arm64", "macos-x64", "windows-x64", "linux-x64-deb", "linux-x64-rpm")
 # Updated through Sparkle (macOS) and WinSparkle: an EdDSA signature and a feed each.
 SPARKLE = ("macos-arm64", "macos-x64", "windows-x64")
@@ -281,6 +283,10 @@ def build(assets, tag, channel, download_base, site_base, out, current=None, all
     files = {f"desktop/channels/{channel}.json": json.dumps(pointer, indent=2, ensure_ascii=False) + "\n"}
     for platform in SPARKLE:
         files[f"desktop/{channel}/appcast-{platform}.xml"] = appcast(pointer, platform)
+    android_files, android_copies = android_release.site_files(
+        assets, site_base, channel, pointer["version"], pointer["build"])
+    files.update(android_files)
+    copies.update(android_copies)
     for relative, source in copies.items():
         path = os.path.join(out, relative)
         os.makedirs(os.path.dirname(path), exist_ok=True)

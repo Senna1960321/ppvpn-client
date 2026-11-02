@@ -105,7 +105,7 @@ class AppState {
     final signedIn = snapshot.value.auth == rust.UiAuth.signedIn;
     final messageId = push?.messageId;
     final link = push?.message.deepLink;
-    if (link != null) {
+    if (link != null && canOpenUrl(link)) {
       unawaited(openUrl(link));
       if (messageId != null && signedIn) {
         try {

@@ -42,9 +42,10 @@
 #         as on macOS, which the macos job's clippy covers): ci.yml's
 #         `tunnel (ios)` builds it for iOS only then (~25 min cold, on the
 #         scarce macOS runners), and `tunnel (android)` for Android.
-#   android  flutter or tunnel: the Android app packs the tunnel host for
-#         its VpnService (#448), so ci.yml's android job builds and tests
-#         when either changed.
+#   android  flutter, tunnel or the updater test harness: the Android app
+#         packs the tunnel host for its VpnService (#448), so ci.yml's
+#         android job builds and tests when either changed; the native
+#         updater tests also run for tools/desktop/ci/android-update-tests/.
 #   memory  the memory harness (ne-mem, tools/perf/{ne_mem,dhat_top}.py, test/perf/)
 #         or Cargo.lock (a sail upgrade): ci.yml's macos and linux jobs
 #         then build it in release and measure (#388).
@@ -67,7 +68,7 @@ files=$(gh api "repos/$GITHUB_REPOSITORY/compare/$base...$GITHUB_SHA" \
 n=$(grep -c . <<<"$files" || true)
 (( n > 0 && n < 300 )) || all
 
-code=false flutter=false deps=false lock=false macpkg=false memory=false tunnel=false
+code=false flutter=false deps=false lock=false macpkg=false memory=false tunnel=false android=false
 while IFS= read -r f; do
   case $f in
     *.md) ;;
@@ -95,6 +96,7 @@ while IFS= read -r f; do
       deps=true flutter=true code=true ;;
     apps/flutter/rust/* | apps/flutter/push-agent/*) flutter=true code=true ;;
     apps/flutter/*) flutter=true ;;
+    tools/desktop/ci/android-update-tests/*) android=true code=true ;;
     crates/desktop/* | crates/engine-host/* | crates/service/*) flutter=true code=true ;;
     crates/account/* | crates/core/*) flutter=true code=true ;;
     apps/macos/scripts/* | apps/macos/PPVPNAgent/* | apps/macos/AppLogic/* | \
@@ -111,7 +113,7 @@ echo "lock=$lock"
 echo "macpkg=$macpkg"
 echo "memory=$memory"
 echo "tunnel=$tunnel"
-if [ "$flutter" = true ] || [ "$tunnel" = true ]; then
+if [ "$android" = true ] || [ "$flutter" = true ] || [ "$tunnel" = true ]; then
   echo "android=true"
 else
   echo "android=false"

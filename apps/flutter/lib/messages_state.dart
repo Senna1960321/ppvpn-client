@@ -221,7 +221,7 @@ class MessagesState {
   /// 「查看详情」: opens the link in the browser and marks the message read.
   void openLink(rust.UiMessage message) {
     final link = message.deepLink;
-    if (link == null) return;
+    if (link == null || !canOpenUrl(link)) return;
     if (!fixed) unawaited(openUrl(link));
     unawaited(setRead(message, true));
   }

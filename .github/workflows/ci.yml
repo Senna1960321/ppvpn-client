@@ -502,6 +502,8 @@ jobs:
         run: |
           bash -n tools/desktop/*.sh tools/desktop/ci/*.sh
           python3 -m unittest discover -s tools/desktop/ci -p '*_test.py' -v
+          npm --prefix tools/desktop/ci/android-update-tests ci --ignore-scripts
+          npm --prefix tools/desktop/ci/android-update-tests test
       # swift.org's toolchain for the runner's Ubuntu, its signature checked
       # against swift.org's keys. Not cached: about 1 GB of the repository's
       # 20 GB, for about a minute of download.
@@ -1202,6 +1204,14 @@ jobs:
           export ANDROID_NDK_HOME="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}"
           apps/flutter/scripts/ci-build.sh
           ls -l "${{ github.workspace }}/apps/flutter/build/app/outputs/flutter-apk"
+      - name: APK updater and Play exclusion tests
+        if: steps.scope.outputs.android == 'true'
+        timeout-minutes: 15
+        run: |
+          python3 tools/desktop/ci/android-update-tests/run.py \
+            --gradle "$GITHUB_WORKSPACE/apps/flutter/android/gradlew" \
+            --flutter-root "$RUNNER_TEMP/flutter-sdk/flutter" \
+            --work "$RUNNER_TEMP/android-update-tests"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         timeout-minutes: 10
         if: steps.scope.outputs.android == 'true'
