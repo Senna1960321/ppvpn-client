@@ -760,14 +760,21 @@ pub fn auto_update() -> Option<bool> {
     crate::silent::auto_update()
 }
 
+/// Saves the switch; false when it could not be saved. Off drops a
+/// downloaded package.
 #[frb(sync)]
-pub fn set_auto_update(enabled: bool) {
-    crate::silent::set_auto_update(enabled);
+pub fn set_auto_update(enabled: bool) -> bool {
+    crate::silent::set_auto_update(enabled)
 }
 
 /// The service opened the app again after an idle install: it starts in
-/// the tray. Clears the mark.
+/// the tray. [`clear_start_hidden`] once it is known not to be installing.
 #[frb(sync)]
-pub fn take_start_hidden() -> bool {
-    crate::silent::take_start_hidden()
+pub fn start_hidden() -> bool {
+    crate::silent::start_hidden()
+}
+
+#[frb(sync)]
+pub fn clear_start_hidden() {
+    crate::silent::clear_start_hidden();
 }

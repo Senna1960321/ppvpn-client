@@ -78,7 +78,7 @@ Future<void> main() async {
     Settings.load();
     // In the tray also when the service opened the app again after an
     // idle silent update (#548).
-    background = rust.startedInBackground() || (!mobile && rust.takeStartHidden());
+    background = rust.startedInBackground() || (!mobile && rust.startHidden());
     rust.refreshLaunchAtLogin();
     app = AppState(rust.start());
     mark('client_created');
@@ -120,26 +120,30 @@ Future<void> main() async {
   // An update is being installed (#548): the app says so, connects
   // nothing and quits.
   if (samplePage == null && await Updates.installingNow()) {
-    runApp(
-      PrototypeApp(
-        app: app,
-        installing: () {
-          app.stop();
-          exit(0);
-        },
-      ),
-    );
+    void done() {
+      app.stop();
+      exit(0);
+    }
+
+    runApp(PrototypeApp(app: app, installing: done));
+    // Its close button quits too, as does the Windows installer's quit.
+    windowManager.addListener(_QuitOnClose(done));
+    listenForActivations(onShow: () {}, onPush: (_) {}, onQuit: done, onUserQuit: done, onUpdate: () {});
     await windowManager.show();
     await windowManager.focus();
     return;
   }
+  // Not installing: the mark for the tray has done its part.
+  if (samplePage == null) rust.clearStartHidden();
 
   Tray? tray;
   // With [update], a silent update that is ready goes to the service once
   // the window and the tray are gone and the cores stopped (#548); not
   // when an installer asks the app to quit.
   Future<void> quit({bool update = true}) async {
-    final install = update && Updates.readyAtQuit;
+    // An idle install the service accepted meanwhile stands: nothing to send.
+    final accepted = await Updates.quitting();
+    final install = update && !accepted && Updates.readyAtQuit;
     if (install) {
       tray?.dispose();
       await windowManager.hide();
@@ -158,8 +162,12 @@ Future<void> main() async {
   // Before the tray, whose menu offers a check where the app installs updates.
   if (samplePage == null) {
     await Updates.start(
-      // Nothing connected and no window: only the tray.
-      idle: () async => app.snapshot.value.phase == rust.UiPhase.off && !await windowManager.isVisible(),
+      // Nothing connected and no window: only the tray. A minimised
+      // window counts as open.
+      idle: () async =>
+          _notConnected.contains(app.snapshot.value.phase) &&
+          !await windowManager.isVisible() &&
+          !await windowManager.isMinimized(),
       quit: () => quit(update: false),
     );
   }
@@ -183,6 +191,8 @@ Future<void> main() async {
       }()),
       // The installer is about to replace the app's files.
       onQuit: () => unawaited(quit(update: false)),
+      // The application menu's Quit (macOS).
+      onUserQuit: () => unawaited(quit()),
       // The update's installer runs: out of sight until it asks the app to quit.
       onUpdate: () => unawaited(() async {
         shown.dispose();
@@ -197,6 +207,18 @@ class _HideOnClose with WindowListener {
   @override
   void onWindowClose() => unawaited(windowManager.hide());
 }
+
+class _QuitOnClose with WindowListener {
+  _QuitOnClose(this.quit);
+
+  final void Function() quit;
+
+  @override
+  void onWindowClose() => quit();
+}
+
+/// Phases with nothing connected: an idle silent update may go ahead.
+const _notConnected = {rust.UiPhase.off, rust.UiPhase.error, rust.UiPhase.contended};
 
 class PrototypeApp extends StatefulWidget {
   const PrototypeApp({super.key, required this.app, this.tray, this.installing});

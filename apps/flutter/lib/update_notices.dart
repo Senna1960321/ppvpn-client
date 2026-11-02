@@ -1,7 +1,8 @@
 // The silent update's two notices (#548, updates.dart):
 // - UpdatedNotice: 「已更新到 PPVPN {v}」 at the top of the overview, once,
-//   after the service installed this build; closed by its button or after
-//   10 seconds.
+//   after the service installed this build; closed by its button or 10
+//   seconds after the window is first on screen (the app may start in the
+//   tray).
 // - InstallingNotice: the window of an app opened while the service is
 //   installing an update (docs/host-integration.md section 16.5); the app
 //   quits on 「好」 or after 10 seconds, and connects nothing meanwhile.
@@ -10,6 +11,7 @@ import 'dart:async';
 
 import 'package:flutter/widgets.dart';
 import 'package:forui/forui.dart';
+import 'package:window_manager/window_manager.dart';
 
 import 'strings.dart';
 import 'theme.dart';
@@ -46,17 +48,32 @@ class _Updated extends StatefulWidget {
 }
 
 class _UpdatedState extends State<_Updated> {
-  late final Timer _timer;
+  Timer? _timer;
+  var _disposed = false;
 
   @override
   void initState() {
     super.initState();
-    _timer = Timer(_shown, _close);
+    unawaited(_countWhenShown());
+  }
+
+  /// Waits, a second at a time, for the window to be on screen.
+  Future<void> _countWhenShown() async {
+    while (!_disposed) {
+      try {
+        if (await windowManager.isVisible() && !await windowManager.isMinimized()) break;
+      } catch (_) {
+        break;
+      }
+      await Future<void>.delayed(const Duration(seconds: 1));
+    }
+    if (!_disposed) _timer = Timer(_shown, _close);
   }
 
   @override
   void dispose() {
-    _timer.cancel();
+    _disposed = true;
+    _timer?.cancel();
     super.dispose();
   }
 

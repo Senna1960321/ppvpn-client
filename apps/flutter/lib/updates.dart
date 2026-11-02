@@ -13,14 +13,17 @@
 //
 // Silent updates (#548, docs/host-integration.md section 16) on macOS and
 // Windows, with 「自动更新」 on and a service that installs them: the app
-// checks the channel (rust/src/silent.rs) shortly after launch and every
-// 6 hours, downloads a newer package, and hands it to the service when the
-// app quits, or when it is idle (nothing connected, no window: only the
-// tray), never disconnecting anything. Sparkle's and WinSparkle's own
-// scheduled checks are off meanwhile; they come back, with their prompt,
-// when the switch is off, the service cannot install silently, or a
-// release has no silent package or failed three times. 「检查更新…」 is
-// always theirs.
+// reads the service's state and checks the channel (rust/src/silent.rs)
+// shortly after launch and every 6 hours (every 15 minutes while the
+// service does not answer), downloads a newer package, and hands it to the
+// service when the app quits, or when it is idle (nothing connected, no
+// window: only the tray), never disconnecting anything: an idle install
+// the service accepted is let go when the app is no longer idle. Sparkle's
+// and WinSparkle's own scheduled checks are off meanwhile; they come back,
+// with their prompt, when the switch is off or not saved, the service
+// cannot install silently, a release has no silent package or failed three
+// times, or the channel has not been read for a day. 「检查更新…」 is always
+// theirs.
 
 import 'dart:async';
 import 'dart:convert';
@@ -59,11 +62,26 @@ class Updates {
   /// 「已更新到 PPVPN {v}」 on the overview, until closed (update_notices.dart).
   static final ValueNotifier<String?> updatedTo = ValueNotifier(null);
 
-  /// The service's state at launch ([installingNow]).
+  /// The service's state, as last read.
   static rust.UiSilentUpdate? _service;
 
   /// The channel's release, as last prepared.
   static rust.UiSilentPrepared? _prepared;
+
+  /// Since when the channel could not be read or the package downloaded.
+  static DateTime? _laterSince;
+
+  /// The switch is saved (a first launch's value too).
+  static bool _saved = true;
+
+  /// When the loop next reads the service and the channel.
+  static DateTime _due = DateTime.now();
+
+  /// The app is quitting: no idle install any more.
+  static bool _quitting = false;
+
+  /// An idle install's request, while it is out.
+  static Future<bool>? _idleRequest;
 
   /// The app is idle: nothing connected and no window (main.dart).
   static Future<bool> Function() _idle = () async => false;
@@ -85,12 +103,19 @@ class Updates {
   /// InstallingNotice and quits. Asked once, before the window.
   static Future<bool> installingNow() async {
     if (!Platform.isMacOS && !Platform.isWindows) return false;
+    await _readService();
+    return _service?.installing ?? false;
+  }
+
+  /// The service's state; its result for this build shows once.
+  static Future<void> _readService() async {
     try {
       _service = await rust.silentUpdateState();
     } catch (error) {
       debugPrint('silent update: $error');
+      _service = null;
     }
-    return _service?.installing ?? false;
+    if (_service?.updatedTo case final version?) updatedTo.value = version;
   }
 
   /// Starts the platform's updater, once the window exists. [idle] tells
@@ -126,21 +151,22 @@ class Updates {
     }
     if (!installs) return;
     // The first launch with the switch takes the old automatic-check
-    // switch's value.
+    // switch's value; unsaved, the app keeps the prompt this time.
     final saved = rust.autoUpdate();
     final enabled = saved ?? checks ?? true;
-    if (saved == null) rust.setAutoUpdate(enabled: enabled);
+    if (saved == null) _saved = rust.setAutoUpdate(enabled: enabled);
     autoUpdate.value = enabled;
-    updatedTo.value = _service?.updatedTo;
     await _promptChecks();
-    if (_service?.available ?? false) unawaited(_silentLoop());
+    unawaited(_silentLoop());
   }
 
   /// The service installs this release silently.
   static bool get _silent =>
       autoUpdate.value == true &&
+      _saved &&
       (_service?.available ?? false) &&
-      _prepared != rust.UiSilentPrepared.prompt;
+      _prepared != rust.UiSilentPrepared.prompt &&
+      !(_laterSince != null && DateTime.now().difference(_laterSince!) > const Duration(days: 1));
 
   /// Sparkle's or WinSparkle's scheduled checks (and their prompt): on
   /// unless the service installs silently.
@@ -157,42 +183,75 @@ class Updates {
     }
   }
 
-  /// Shortly after launch and every 6 hours: the channel, then an idle
+  /// Every minute: the service and the channel when due, then an idle
   /// install while a package is ready.
   static Future<void> _silentLoop() async {
-    await Future<void>.delayed(const Duration(seconds: 30));
-    while (true) {
-      if (autoUpdate.value == true) {
-        try {
-          _prepared = await rust.silentUpdatePrepare();
-        } catch (error) {
-          debugPrint('silent update: $error');
-        }
+    _due = DateTime.now().add(const Duration(seconds: 30));
+    while (!_quitting) {
+      await Future<void>.delayed(const Duration(minutes: 1));
+      if (_quitting) return;
+      if (!DateTime.now().isBefore(_due)) {
+        await _readService();
+        final available = _service?.available ?? false;
+        _due = DateTime.now().add(available ? const Duration(hours: 6) : const Duration(minutes: 15));
+        if (available && autoUpdate.value == true) await _prepare();
         await _promptChecks();
-        if (_prepared == rust.UiSilentPrepared.ready) await _installWhenIdle(const Duration(hours: 6));
       }
-      await Future<void>.delayed(const Duration(hours: 6));
+      if (_silent && _prepared == rust.UiSilentPrepared.ready && await _idle()) {
+        // Refused or let go: the package is checked again in an hour.
+        if (!await _installIdle()) _due = DateTime.now().add(const Duration(hours: 1));
+      }
     }
   }
 
-  /// Every minute for [within]: installs once the app is idle.
-  static Future<void> _installWhenIdle(Duration within) async {
-    final until = DateTime.now().add(within);
-    while (DateTime.now().isBefore(until)) {
-      await Future<void>.delayed(const Duration(minutes: 1));
-      if (!_silent || _prepared != rust.UiSilentPrepared.ready) return;
-      if (!await _idle()) continue;
-      var accepted = false;
-      try {
-        accepted = await rust.silentUpdateInstall(relaunch: true);
-      } catch (error) {
-        debugPrint('silent update: $error');
-      }
-      if (accepted) return _quit();
-      // Refused or unanswered: the package is checked again next time.
-      _prepared = null;
-      return;
+  static Future<void> _prepare() async {
+    try {
+      _prepared = await rust.silentUpdatePrepare();
+    } catch (error) {
+      debugPrint('silent update: $error');
+      _prepared = rust.UiSilentPrepared.later;
     }
+    if (_prepared == rust.UiSilentPrepared.later) {
+      _laterSince ??= DateTime.now();
+    } else {
+      _laterSince = null;
+    }
+  }
+
+  /// Hands the package to the service to install once the app exits, and
+  /// quits; false when refused, or when the app is no longer idle by the
+  /// answer (the service then records that the app did not exit, and
+  /// installs nothing).
+  static Future<bool> _installIdle() async {
+    final request = rust.silentUpdateInstall(relaunch: true).catchError((Object error) {
+      debugPrint('silent update: $error');
+      return false;
+    });
+    _idleRequest = request;
+    final accepted = await request;
+    _idleRequest = null;
+    if (!accepted) {
+      _prepared = null;
+      return false;
+    }
+    // Quitting meanwhile: quit() goes on, the service installs.
+    if (_quitting) return true;
+    if (!await _idle()) {
+      rust.clearStartHidden();
+      _prepared = null;
+      return false;
+    }
+    _quitting = true;
+    await _quit();
+    return true;
+  }
+
+  /// Called first when the app quits: no idle install from now on. True
+  /// when an idle install's request was out and the service accepted it:
+  /// [installAtQuit] has nothing to send.
+  static Future<bool> quitting() async {
+    _quitting = true;
+    return await _idleRequest ?? false;
   }
 
   /// A package is ready for [installAtQuit].
@@ -210,25 +269,12 @@ class Updates {
     }
   }
 
-  /// Linux: there is a feed to check.
-  static bool get notices => _feed != null;
-
-  /// A check the user asked for: Sparkle's or WinSparkle's own windows, or
-  /// (Linux) the repository's latest.json.
-  static Future<void> check() async {
-    if (Platform.isMacOS) {
-      await _channel.invokeMethod<void>('check');
-    } else if (installs) {
-      rust.checkForUpdates();
-    } else if (notices) {
-      checked.value = null;
-      checked.value = await _checkFeed();
-    }
-  }
-
   static Future<void> setAutoUpdate(bool enabled) async {
-    rust.setAutoUpdate(enabled: enabled);
+    _saved = rust.setAutoUpdate(enabled: enabled);
     autoUpdate.value = enabled;
+    if (!enabled) _prepared = null;
+    // On: the channel within the minute.
+    if (enabled) _due = DateTime.now();
     await _promptChecks();
   }
 

@@ -100,14 +100,16 @@ pub enum FailureKind {
     Fallback,
 }
 
-/// The kind of an `UPDATE_*` code, matched on the part before a colon
-/// (`UPDATE_INSTALL_FAILED:<detail>`). Codes this app does not know are
-/// counted.
+/// The kind of a failure's code, matched on the part before a colon
+/// (`UPDATE_INSTALL_FAILED:<detail>`). An `UPDATE_*` code this app does not
+/// know is counted; anything else (the service stopping, the IPC's own
+/// errors) is no verdict on the package and is tried again.
 pub fn failure_kind(code: &str) -> FailureKind {
     match code.split(':').next().unwrap_or_default().trim() {
         "UPDATE_BUSY" | "UPDATE_IN_PROGRESS" | "UPDATE_CLIENT_STILL_RUNNING" => FailureKind::Retry,
         "UPDATE_UNSUPPORTED" | "UPDATE_NOT_NEWER" => FailureKind::Fallback,
-        _ => FailureKind::Counted,
+        code if code.starts_with("UPDATE_") => FailureKind::Counted,
+        _ => FailureKind::Retry,
     }
 }
 
@@ -311,6 +313,12 @@ impl SilentUpdater {
         Ok(())
     }
 
+    /// Removes the cache's downloads (after an install, a fallback to the
+    /// prompt, or with the switch off).
+    pub fn clear_cache(&self) {
+        let _ = std::fs::remove_dir_all(&self.cache);
+    }
+
     /// The service's `GetVersion`, for silent updates.
     pub async fn service_updates(&self) -> ServiceUpdates {
         match self.service.get_version().await {
@@ -487,9 +495,16 @@ mod tests {
             "UPDATE_VERSION_MISMATCH",
             "UPDATE_INSTALL_FAILED:exit 1",
             "UPDATE_INSTALL_FAILED:interrupted",
-            "SOMETHING_NEW",
+            "UPDATE_SOMETHING_NEW",
         ] {
             assert_eq!(failure_kind(code), FailureKind::Counted, "{code}");
+        }
+        for code in [
+            "SERVICE_STOPPING",
+            "signature verification failed",
+            "bad payload",
+        ] {
+            assert_eq!(failure_kind(code), FailureKind::Retry, "{code}");
         }
     }
 
