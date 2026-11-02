@@ -30,6 +30,7 @@ function cargo {
   $global:LASTEXITCODE = 0
 }
 function Invoke-WebRequest { throw "unexpected network access" }
+try {
 if ($env:PPVPN_TEST_MODE -eq "build") {
   & $env:PPVPN_TEST_SCRIPT -ServiceOnly -OutDir $env:PPVPN_TEST_HANDOFF
 } else {
@@ -37,6 +38,12 @@ if ($env:PPVPN_TEST_MODE -eq "build") {
   # It stops the full production script before staging, downloads or signing.
   & $env:PPVPN_TEST_SCRIPT -Bundle $env:PPVPN_TEST_BUNDLE -ServiceDir $env:PPVPN_TEST_HANDOFF `
     -PushAgent (Join-Path $env:PPVPN_TEST_ROOT "pin-check-complete")
+}
+} catch {
+  # Host-dependent PowerShell error rendering inserts colour and wraps a
+  # message at different widths. Assert the exception, not that rendering.
+  [Console]::Error.WriteLine($_.Exception.Message)
+  exit 1
 }
 '''
 
