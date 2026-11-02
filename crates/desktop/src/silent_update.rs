@@ -390,10 +390,6 @@ async fn remove_others(cache: &Path, keep: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core_ipc::{ApplyChoices, BoxFuture};
-    use crate::service::{ServiceStatus, SessionRef, VersionInfo};
-    use crate::RoutingMode;
-    use std::sync::{Arc, Mutex};
 
     fn pointer() -> Value {
         serde_json::json!({
@@ -497,162 +493,173 @@ mod tests {
         }
     }
 
-    /// The service's answers, and the payload it was sent.
-    struct Fake {
-        version: Result<VersionInfo, ServiceError>,
-        install: Result<(), ServiceError>,
-        sent: Arc<Mutex<Option<InstallUpdatePayload>>>,
-    }
-
-    impl ServiceApi for Fake {
-        fn get_version(&self) -> BoxFuture<'_, Result<VersionInfo, ServiceError>> {
-            Box::pin(async { self.version.clone() })
-        }
-        fn get_status(&self) -> BoxFuture<'_, Result<ServiceStatus, ServiceError>> {
-            unreachable!()
-        }
-        fn connect<'a>(
-            &'a self,
-            _: &'a SessionRef,
-            _: &'a Value,
-            _: bool,
-            _: RoutingMode,
-            _: &'a ApplyChoices,
-        ) -> BoxFuture<'a, Result<u32, ServiceError>> {
-            unreachable!()
-        }
-        fn update_profile<'a>(
-            &'a self,
-            _: &'a SessionRef,
-            _: &'a Value,
-            _: RoutingMode,
-            _: &'a ApplyChoices,
-        ) -> BoxFuture<'a, Result<ServiceStatus, ServiceError>> {
-            unreachable!()
-        }
-        fn renew_lease<'a>(
-            &'a self,
-            _: &'a SessionRef,
-        ) -> BoxFuture<'a, Result<ServiceStatus, ServiceError>> {
-            unreachable!()
-        }
-        fn disconnect<'a>(&'a self, _: &'a SessionRef) -> BoxFuture<'a, Result<(), ServiceError>> {
-            unreachable!()
-        }
-        fn core_api<'a>(
-            &'a self,
-            _: &'a SessionRef,
-            _: &'a str,
-            _: Value,
-            _: Duration,
-        ) -> BoxFuture<'a, Result<Value, ServiceError>> {
-            unreachable!()
-        }
-        fn install_update<'a>(
-            &'a self,
-            payload: &'a InstallUpdatePayload,
-        ) -> BoxFuture<'a, Result<(), ServiceError>> {
-            *self.sent.lock().unwrap() = Some(payload.clone());
-            Box::pin(async { self.install.clone() })
-        }
-    }
-
-    type Sent = Arc<Mutex<Option<InstallUpdatePayload>>>;
-
-    fn updater(
-        version: Result<VersionInfo, ServiceError>,
-        install: Result<(), ServiceError>,
-    ) -> (SilentUpdater, Sent) {
-        let sent = Sent::default();
-        let fake = Fake {
-            version,
-            install,
-            sent: sent.clone(),
-        };
-        let updater = SilentUpdater::with_service(
-            Box::new(fake),
-            "https://example.com/desktop/channels/stable.json".into(),
-            412,
-            std::env::temp_dir().join("ppvpn-silent-update-test"),
-            "PPVPN/test",
-        )
-        .expect("a system with silent updates");
-        (updater, sent)
-    }
-
-    fn package() -> UpdatePackage {
-        match package_in_pointer(&pointer(), "windows-x64", 412).unwrap() {
-            Latest::Newer(package) => package,
-            other => panic!("{other:?}"),
-        }
-    }
-
+    /// Against a fake service: only where there are silent updates.
     #[cfg(any(target_os = "macos", windows))]
-    #[tokio::test]
-    async fn an_older_service_has_no_silent_updates() {
-        let old = VersionInfo {
-            service: "PPVPN Service".into(),
-            version: "0.7.4".into(),
-            ..VersionInfo::default()
-        };
-        assert_eq!(
-            updater(Ok(old), Ok(())).0.service_updates().await,
-            ServiceUpdates::Unsupported
-        );
-        let missing = Err(ServiceError::Unavailable("connect: no such file".into()));
-        assert_eq!(
-            updater(missing, Ok(())).0.service_updates().await,
-            ServiceUpdates::Unsupported
-        );
-        let current = VersionInfo {
-            build: Some(412),
-            ..VersionInfo::default()
-        };
-        assert_eq!(
-            updater(Ok(current), Ok(())).0.service_updates().await,
-            ServiceUpdates::Supported {
-                build: 412,
-                update: None,
-                last_update: None
-            }
-        );
-    }
+    mod service {
+        use super::*;
+        use crate::core_ipc::{ApplyChoices, BoxFuture};
+        use crate::service::{ServiceStatus, SessionRef, VersionInfo};
+        use crate::RoutingMode;
+        use std::sync::{Arc, Mutex};
 
-    #[cfg(any(target_os = "macos", windows))]
-    #[tokio::test]
-    async fn install_sends_the_package_and_maps_the_answer() {
-        let (accepted, sent) = updater(Ok(VersionInfo::default()), Ok(()));
-        let path = Path::new("/tmp/PPVPN-Setup.exe");
-        assert_eq!(
-            accepted.install(path, &package(), true).await,
-            InstallAnswer::Accepted
-        );
-        assert_eq!(
-            sent.lock().unwrap().clone().unwrap(),
-            InstallUpdatePayload {
-                path: path.display().to_string(),
-                version: "0.7.6".into(),
-                build: 420,
-                length: 30,
-                ed_signature: "exe".into(),
-                relaunch: true,
+        /// The service's answers, and the payload it was sent.
+        struct Fake {
+            version: Result<VersionInfo, ServiceError>,
+            install: Result<(), ServiceError>,
+            sent: Arc<Mutex<Option<InstallUpdatePayload>>>,
+        }
+
+        impl ServiceApi for Fake {
+            fn get_version(&self) -> BoxFuture<'_, Result<VersionInfo, ServiceError>> {
+                Box::pin(async { self.version.clone() })
             }
-        );
-        let (refused, _) = updater(
-            Ok(VersionInfo::default()),
-            Err(ServiceError::Failed("UPDATE_BUSY".into())),
-        );
-        assert_eq!(
-            refused.install(path, &package(), false).await,
-            InstallAnswer::Refused("UPDATE_BUSY".into())
-        );
-        let (closed, _) = updater(
-            Ok(VersionInfo::default()),
-            Err(ServiceError::Protocol("read: connection closed".into())),
-        );
-        assert!(matches!(
-            closed.install(path, &package(), false).await,
-            InstallAnswer::NoAnswer(_)
-        ));
+            fn get_status(&self) -> BoxFuture<'_, Result<ServiceStatus, ServiceError>> {
+                unreachable!()
+            }
+            fn connect<'a>(
+                &'a self,
+                _: &'a SessionRef,
+                _: &'a Value,
+                _: bool,
+                _: RoutingMode,
+                _: &'a ApplyChoices,
+            ) -> BoxFuture<'a, Result<u32, ServiceError>> {
+                unreachable!()
+            }
+            fn update_profile<'a>(
+                &'a self,
+                _: &'a SessionRef,
+                _: &'a Value,
+                _: RoutingMode,
+                _: &'a ApplyChoices,
+            ) -> BoxFuture<'a, Result<ServiceStatus, ServiceError>> {
+                unreachable!()
+            }
+            fn renew_lease<'a>(
+                &'a self,
+                _: &'a SessionRef,
+            ) -> BoxFuture<'a, Result<ServiceStatus, ServiceError>> {
+                unreachable!()
+            }
+            fn disconnect<'a>(
+                &'a self,
+                _: &'a SessionRef,
+            ) -> BoxFuture<'a, Result<(), ServiceError>> {
+                unreachable!()
+            }
+            fn core_api<'a>(
+                &'a self,
+                _: &'a SessionRef,
+                _: &'a str,
+                _: Value,
+                _: Duration,
+            ) -> BoxFuture<'a, Result<Value, ServiceError>> {
+                unreachable!()
+            }
+            fn install_update<'a>(
+                &'a self,
+                payload: &'a InstallUpdatePayload,
+            ) -> BoxFuture<'a, Result<(), ServiceError>> {
+                *self.sent.lock().unwrap() = Some(payload.clone());
+                Box::pin(async { self.install.clone() })
+            }
+        }
+
+        type Sent = Arc<Mutex<Option<InstallUpdatePayload>>>;
+
+        fn updater(
+            version: Result<VersionInfo, ServiceError>,
+            install: Result<(), ServiceError>,
+        ) -> (SilentUpdater, Sent) {
+            let sent = Sent::default();
+            let fake = Fake {
+                version,
+                install,
+                sent: sent.clone(),
+            };
+            let updater = SilentUpdater::with_service(
+                Box::new(fake),
+                "https://example.com/desktop/channels/stable.json".into(),
+                412,
+                std::env::temp_dir().join("ppvpn-silent-update-test"),
+                "PPVPN/test",
+            )
+            .expect("a system with silent updates");
+            (updater, sent)
+        }
+
+        fn package() -> UpdatePackage {
+            match package_in_pointer(&pointer(), "windows-x64", 412).unwrap() {
+                Latest::Newer(package) => package,
+                other => panic!("{other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn an_older_service_has_no_silent_updates() {
+            let old = VersionInfo {
+                service: "PPVPN Service".into(),
+                version: "0.7.4".into(),
+                ..VersionInfo::default()
+            };
+            assert_eq!(
+                updater(Ok(old), Ok(())).0.service_updates().await,
+                ServiceUpdates::Unsupported
+            );
+            let missing = Err(ServiceError::Unavailable("connect: no such file".into()));
+            assert_eq!(
+                updater(missing, Ok(())).0.service_updates().await,
+                ServiceUpdates::Unsupported
+            );
+            let current = VersionInfo {
+                build: Some(412),
+                ..VersionInfo::default()
+            };
+            assert_eq!(
+                updater(Ok(current), Ok(())).0.service_updates().await,
+                ServiceUpdates::Supported {
+                    build: 412,
+                    update: None,
+                    last_update: None
+                }
+            );
+        }
+
+        #[tokio::test]
+        async fn install_sends_the_package_and_maps_the_answer() {
+            let (accepted, sent) = updater(Ok(VersionInfo::default()), Ok(()));
+            let path = Path::new("/tmp/PPVPN-Setup.exe");
+            assert_eq!(
+                accepted.install(path, &package(), true).await,
+                InstallAnswer::Accepted
+            );
+            assert_eq!(
+                sent.lock().unwrap().clone().unwrap(),
+                InstallUpdatePayload {
+                    path: path.display().to_string(),
+                    version: "0.7.6".into(),
+                    build: 420,
+                    length: 30,
+                    ed_signature: "exe".into(),
+                    relaunch: true,
+                }
+            );
+            let (refused, _) = updater(
+                Ok(VersionInfo::default()),
+                Err(ServiceError::Failed("UPDATE_BUSY".into())),
+            );
+            assert_eq!(
+                refused.install(path, &package(), false).await,
+                InstallAnswer::Refused("UPDATE_BUSY".into())
+            );
+            let (closed, _) = updater(
+                Ok(VersionInfo::default()),
+                Err(ServiceError::Protocol("read: connection closed".into())),
+            );
+            assert!(matches!(
+                closed.install(path, &package(), false).await,
+                InstallAnswer::NoAnswer(_)
+            ));
+        }
     }
 }
