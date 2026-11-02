@@ -30,8 +30,8 @@
   - iOS 的 XCFramework：`scripts/build-xcframework.sh <输出目录>`，产物是 `PPVPNTunnel.xcframework`（真机和模拟器的静态库，模块名 `PPVPNTunnel`）和 `PPVPNTunnel.ldflags`（扩展要链接的系统库）。只放进网络扩展，不放进 app。
   - Android 的 JNI：`scripts/build-android.sh <输出目录>` 产出 `<abi>/libppvpn_tunnel.so`（arm64-v8a、x86_64，放进 app 的 jniLibs），Kotlin 类 `com.peakpassvpn.ppvpn.tunnel.TunnelHost`（`apps/flutter/runner/android`）。只有 `:tunnel` 进程的 TunnelService 加载它。函数同 C ABI，错误同样以 JSON 字符串返回；`Listener` 的 `protect(fd)` 转给 `VpnService.protect`，`onExit(reason)` 即 C ABI 的 on_exit。
 - **Android 的 TunnelService（`apps/flutter/runner/android`）：** 按 `settings` 用 `VpnService.Builder` 建 TUN，把非 VPN 的最佳网络作为 NetworkState 推给宿主（启动前先推第一份，和 iOS 一样），再在 TUN 的 fd 上启动宿主，socket 是 `filesDir/tunnel.sock`，状态目录是 `filesDir/tunnel-state`。宿主开始服务后报告 on。`apps/flutter/scripts/ci-build.sh` 把两个 ABI 的 `libppvpn_tunnel.so` 放进 APK。
-- **CI：** iOS、Android 的构建和 Linux 上的测试；Android 模拟器上的冒烟测试会拉起系统 VPN，经 `tunnel.sock` 调用宿主，再断开。
-- **发布（`release.yml`）：** 合入 main 时，`ios` 和 `android` 两个任务都只构建，不签名、不上传，用来提前发现构建问题。stable 渠道（正式发布和演练都算）在批准后才签名上传：iOS 传到 TestFlight，Android 的 App Bundle 用 Play 上传密钥签名后传到 Google Play 的内部测试轨道（`tools/desktop/ci/play_upload.py`）。versionCode 用发布的构建号。
+- **CI：** iOS、Android 的构建和 Linux 上的测试；Android 模拟器上的冒烟测试明确选择 `apk` flavor，会拉起系统 VPN，经 `tunnel.sock` 调用宿主，再断开。另有真实更新插件的 Robolectric 测试、APK 签名工具测试和 Flutter 更新页面测试，范围见[测试分层](testing.md#android-分发与更新测试)。
+- **商店发布（`release.yml`）：** 合入 main 时，`ios` 和 `android` 两个任务都只构建，不上传，用来提前发现构建问题。stable 渠道（正式发布和演练都算）在批准后才使用发布密钥并上传：iOS 传到 TestFlight，Android 的 `play` flavor App Bundle 用 Play 上传密钥签名后传到 Google Play 的内部测试轨道（`tools/desktop/ci/play_upload.py`）。versionCode 用发布的构建号。
   - Android 用 `desktop-release-stable` 里的这几个 secret：
     - `ANDROID_UPLOAD_KEYSTORE`：上传密钥库，base64 编码；
     - `ANDROID_UPLOAD_KEYSTORE_PASSWORD`、`ANDROID_UPLOAD_KEY_ALIAS`、`ANDROID_UPLOAD_KEY_PASSWORD`；
@@ -39,8 +39,17 @@
   - 还没有上传密钥或服务账号时，stable 渠道照样构建，但用 debug 密钥签名，不上传，只给出一条警告。
   - Google Play 规定新 App 的第一个包只能在 Play Console 里手动上传，stable 运行产出的 App Bundle 会作为 artifact 保留，供手动上传使用。
   - 发布状态由仓库变量 `PLAY_RELEASE_STATUS` 决定，默认 `completed`。App 从未发布过时，Play 只接受 `draft`。
+- **官网 APK 发布：** 独立的 `android-apk` 任务在 stable 审批通过、仓库设置了 `ANDROID_APK_SIGNER_SHA256` 时才运行。需要与 Play App Signing 应用签名证书一致的密钥；不能把 Play 上传密钥当作这个前提。配置、失败门禁和站点路径见[构建与发布](release.md#android-分发与签名)。
 - **还没有：**
   - 带 profile 的真实连接（要真机和真实节点，CI 里没有）；Android 的常驻通知和 always-on 启动。
+
+## Android 分发与更新
+
+两个 flavor 的应用 ID 都是 `com.peakpassvpn.ppvpn`。`play` 交给 Google Play 更新，不包含 APK 下载器、安装权限或更新文件 provider；「我的」隐藏购买和 About 网页入口，消息及通知链接只允许同一 HTTPS 源的设备授权、工单和账号删除路径。`apk` 保留官网分发的界面并提供应用内更新。构建命令和产物见 [Flutter 构建说明](../apps/flutter/README.md#android-distributions)。
+
+官网 APK 编译时同时设置 `PPVPN_UPDATE_SITE` 和 `PPVPN_RELEASE_CHANNEL`，从 `<站点>/android/<频道>/latest.json` 检查更新。应用启动 15 秒后检查，此后每 24 小时检查一次；没有编译更新源的构建不显示更新入口。未登录的页面和登录后的「我的」都能打开「检查更新…」。发现新版本后，用户点「下载并安装」；若系统尚未允许此来源安装应用，先到系统设置授权，返回后再点一次，最后由 Android 安装界面确认。这里不做静默安装。
+
+原生更新插件只接受配置中的 HTTPS 源，不跟随重定向；下载到应用私有缓存，核对长度、SHA-256、包名、版本名、更高的 versionCode 和与当前安装一致的签名证书，再经只读 `content://` URI 交给系统安装器。更新源上限为 64 KiB，APK 上限为 512 MiB；签名密钥轮换需要另做迁移，不能直接换证书。真实设备上的完整升级、权限返回、后台切换与账号保留仍需人工验收，Robolectric 不代替这些检查。
 
 ## 隧道进程里的健康检查
 

@@ -1,6 +1,6 @@
 # ppvpn-client
 
-[PPVPN (PeakPass VPN)](https://www.peakpassvpn.com) 的客户端仓库：macOS、Windows、Linux 桌面客户端，命令行 `ppvpn`，以及它们共用的 Rust 网络引擎 `ppvpn-core`。移动端（Android、iOS）以后也放在这里。
+[PPVPN (PeakPass VPN)](https://www.peakpassvpn.com) 的客户端仓库：macOS、Windows、Linux 桌面客户端，命令行 `ppvpn`，以及它们共用的 Rust 网络引擎 `ppvpn-core`。Android、iOS 的 Flutter 界面和隧道宿主也在本仓库，当前范围见[移动端接入](docs/mobile.md)。
 
 下载安装包请到[官网](https://www.peakpassvpn.com)或 [GitHub Releases](https://github.com/peakpassvpn/ppvpn-client/releases)。桌面端、CLI 和引擎同一个版本、同一个 Release，见[构建与发布](docs/release.md)。
 
@@ -27,7 +27,7 @@
 - [Backend Profile](docs/backend-profile.md)：逻辑节点/多入口故障转移、完整字段、路由语义、协议示例和后端生成规则
 - [Core API v1](docs/core-api.md)：认证、请求/响应、所有方法、DTO、事件及错误码
 - [桌面平台接入](docs/desktop.md)：Windows 与 macOS 都由特权 service 以 TUN 模式运行 core
-- [移动端接入](docs/mobile.md)：移动端现状（FFI 尚未提供）与宿主职责
+- [移动端接入](docs/mobile.md)：隧道宿主、Android Play / 官网 APK 分发与应用内更新
 - [Rust 版行为对照](docs/rust-parity.md)：Go 测试与 Rust `ppvpn-core`（`crates/core`）用例的逐条对照（#214 硬切换的前提）
 - [测试分层](docs/testing.md)：L1 单元、L2 集成、L3 系统，各层的依赖、入口和 CI 时机
 - [宿主接入](docs/host-integration.md)：Rust API 契约

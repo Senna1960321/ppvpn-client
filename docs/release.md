@@ -12,7 +12,7 @@
   桌面客户端和特权服务用同一个版本，写在根 `Cargo.toml` 的 `[workspace.package] version`，各 crate 用
   `version.workspace = true` 继承，`Cargo.lock` 随之更新。`apps/macos/project.yml` 的 `MARKETING_VERSION`
   与它保持一致，改版本时一起改。
-- 一个版本一个 tag `vX.Y.Z`、一个 GitHub Release：里面是三个平台的安装包和 CLI 的归档。发行时安装包的版本
+- 一个版本一个 tag `vX.Y.Z`、一个 GitHub Release：里面是三个桌面平台的安装包、CLI 的归档，以及启用时的官网 Android APK。发行时安装包的版本
   来自手动触发时填的版本（必须在 tag `v<版本>` 上运行）；CLI 的构建核对它等于 `Cargo.toml` 的版本，不等则
   发行失败。
 - Go 内核的 Release 用的是同样的 tag 形式（v0.5.14 到 v0.5.21）。`release.yml` 拒绝 0.6.0 以下的 stable 版本，
@@ -24,7 +24,7 @@
 
 测试按依赖分三层，各个 job 和平台测试的约定见 [测试分层](testing.md)。只有两个 workflow：
 
-- `ci.yml`：PR 推送时跑全部测试，7 个 job 并行（`lint`、`unit`、`integration`、`desktop`、`linux`、`macos`、`windows`）。
+- `ci.yml`：PR 推送时按变更范围运行测试，各平台和 Android 更新测试的入口见[测试分层](testing.md)。
 - `release.yml`：
   - 安装包是 Flutter 版（`apps/flutter`，#401），文件名、更新源和签名与原生版相同；原生版不再发行。
   - 每次合入 main：三个平台的安装包（`linux`、`macos`、`windows`，不读任何密钥：Windows 不签名、macOS ad-hoc 签名、
@@ -32,7 +32,7 @@
     deb 和 rpm 各在固定的 Ubuntu、Fedora 镜像里离线安装一次（依赖包来自缓存），apt/dnf 仓库自测（`linux-smoke`、`linux-repo`）；依赖变了时保存
     `ci.yml` 恢复的构建缓存（`cache-*`）。什么都不发布。
   - 手动触发：`channel=stable` 在 tag `vX.Y.Z` 上、经 `desktop-release-approval` 审批后，在
-    `desktop-release-stable` 里构建并签名，`release-files` 整体核对，`publish` 发 GitHub Release（安装包和 CLI，
+    `desktop-release-stable` 里构建并签名，`release-files` 整体核对，`publish` 发 GitHub Release（桌面安装包、CLI 和启用时的官网 APK，
     SHA256SUMS 和构建 provenance），`site` 按 Release 重建更新站点，`site-deploy` 把它上传到 R2。
     `channel=dev` 在 main 上、`desktop-release-dev` 里构建，从不发布。`channel=site` 经同一审批，只按已发布的
     Release 重建并上传更新站点。
@@ -55,6 +55,31 @@
 - 本地构建不设它时：Flutter 应用需要环境变量 `PPVPN_API_BASE`（或调试构建的设置项），CLI 按 dev 构建处理，也需要 `PPVPN_API_BASE`。
 - 换后端域名只改变量，不改代码。
 - 原生版（`apps/macos`、`apps/windows`、`apps/linux`）不再发行，它们的构建文件里还留着旧的默认地址，没有改。
+
+## Android 分发与签名
+
+`apps/flutter/scripts/ci-build.sh` 用 `ANDROID_DISTRIBUTION=play|apk` 同时选择原生 flavor 和 Dart 的
+`PPVPN_ANDROID_CHANNEL`。`ANDROID_FORMAT=aab` 默认用 `play`，`apk` 默认用 `apk`；AAB 不接受 `apk` flavor。
+两个 flavor 保持同一个应用 ID `com.peakpassvpn.ppvpn`。Play 包不带官网更新安装器，商店上传仍由 `android`
+任务使用上传密钥完成（[移动端接入](mobile.md)）；官网 APK 由单独的 `android-apk` 任务构建。
+
+官网 APK 的签名证书必须与 Play App Signing 的**应用签名证书**及已有安装一致；Play **上传密钥**不能默认代替它。
+只有能提供匹配的 APK 签名密钥时才启用。以下设置与 Play 上传用的 `ANDROID_UPLOAD_*` secrets 分开：
+
+| 名称 | 类型 | 放在 | 内容 |
+| --- | --- | --- | --- |
+| `ANDROID_APK_SIGNER_SHA256` | 变量 | 仓库 | 应用签名证书的 SHA-256，64 位十六进制，可带冒号；公开 pin，也是官网 APK 任务的启用开关 |
+| `ANDROID_APK_KEYSTORE` | secret | 环境 `desktop-release-stable` | 与该证书匹配的 APK 签名密钥库，base64 编码 |
+| `ANDROID_APK_KEYSTORE_PASSWORD`、`ANDROID_APK_KEY_ALIAS`、`ANDROID_APK_KEY_PASSWORD` | secret | 环境 `desktop-release-stable` | 密钥库密码、别名和密钥密码 |
+
+pin 必须是仓库变量，不能只放在环境里：job 是否运行在进入环境前就决定。pin 为空时跳过 APK，历史的纯桌面发行
+仍可发布；启用后只有 stable 审批成功才构建，缺密钥、签名不符或构建失败都会阻止 `release-files` 发布。
+`PPVPN_UPDATE_SITE` 来自仓库变量 `DESKTOP_SITE_BASE`，该任务把 `PPVPN_RELEASE_CHANNEL` 设为 `stable`。
+
+`tools/desktop/ci/android_release.py` 用 `apksigner` 验签并核对证书 pin，再用 `apkanalyzer` 核对包名、版本和
+versionCode，产出 `PPVPN-<版本>-<构建号>-android.apk` 与 `release-meta-android-apk.json`。APK 与桌面安装包
+一起进入 Release、SHA256SUMS 和构建 provenance；演练只生成草稿和站点 artifact。手机上的权限授权和安装确认
+由用户操作，流程见[Android 分发与更新](mobile.md#android-分发与更新)。
 
 ## Windows 签名（Azure Artifact Signing）
 
@@ -91,6 +116,9 @@ Azure Artifact Signing 给程序、安装包和卸载程序签 Authenticode（#4
   平台项有 `install_file`、`install_url`、`install_length`、`install_sha256`、`install_ed_signature`。release-meta
   里没有这个签名的版本（#548 以前）不放 pkg，指针也没有这些字段，应用照旧用 Sparkle 的提示。两个 DMG、两个 pkg
   加 Windows 安装包，每个版本约 275 MB；
+- 启用官网 APK 后，`android/stable/latest.json` 指向
+  `android/stable/<版本>/<构建号>/PPVPN-<版本>-<构建号>-android.apk`。站点构建先核对 APK 元数据和文件的版本、
+  长度与 SHA-256，再写任何桌面或 Android 文件。没有 APK 的历史 Release 仍可重建；有 APK 却缺元数据会拒绝；
 - `linux/`：apt 仓库（`linux/apt`，suite `stable`，保留最近 5 个版本的 deb）、dnf 仓库（`linux/rpm/stable`，
   rpm 本身从 GitHub Release 下载）、安装源设置包、公钥和 `linux/stable/latest.json`（Linux 应用的更新检查）；
 - 已停用的 dev 频道：`linux/dev/latest.json` 和 `desktop/dev/appcast-<平台>.xml` 是 stable 的副本，让以前装的
@@ -98,9 +126,10 @@ Azure Artifact Signing 给程序、安装包和卸载程序签 Authenticode（#4
 
 每次都从 GitHub Releases 重建整个站点（`site`，带签名密钥），再由 `site-deploy`（只带 R2 的密钥）用 S3 API
 （runner 自带的 AWS CLI，`tools/desktop/ci/upload-site.sh`）覆盖上传：先传不会变的文件（pool 里的包、by-hash
-索引、repodata 数据文件、带版本的设置包），再传索引（`Packages*`）、签名的索引（`Release`/`InRelease`/
-`repomd.xml`）、更新检查（`latest.json`、appcast），频道指针最后。不变的文件 `Cache-Control: public,
+索引、repodata 数据文件、带版本的设置包、桌面安装包和 Android APK），再传索引（`Packages*`）、签名的索引（`Release`/`InRelease`/
+`repomd.xml`）、更新检查（Linux `latest.json`、appcast），桌面频道指针和 Android `latest.json` 最后。不变的文件 `Cache-Control: public,
 max-age=31536000, immutable`，其余 `no-cache`；bucket 里已有、内容不同的不变文件会被拒绝，整个上传不开始。
+`linux/`、`desktop/`、`android/` 中任何一个前缀列举失败也会在上传前停止。
 不删除任何对象：客户端已经拿到的索引所指的文件一直在，旧版本的包、安装包和旧的 by-hash 文件会累积，需要时手动清理
 （安装包只有当前频道指针所指的版本还在用）。
 
@@ -119,7 +148,7 @@ max-age=31536000, immutable`，其余 `no-cache`；bucket 里已有、内容不�
 演练（`rehearsal`，在 main 上的 stable 运行）照常构建、签名、出草稿 Release，按本次的文件构建站点，作为
 artifact `site` 保留三天，并在日志里打出上传的顺序和缓存设置（`upload-site.sh --plan`）。审批之后，
 `site-check` 在 `desktop-release-stable` 里带着 R2 的密钥只读地核对一遍（`upload-site.sh --check`）：
-列出桶里 `linux/` 和 `desktop/` 下的对象，像上传那样比对不可变文件（内容不同就失败），并列出真正上传时
+列出桶里 `linux/`、`desktop/` 和 `android/` 下的对象，像上传那样比对不可变文件（内容不同就失败），并列出真正上传时
 会覆盖的现有文件，结果写在运行摘要里。演练不上传任何东西；密钥的写权限在第一次正式发布时才用到。
 
 ### 官网下载（私有桶）

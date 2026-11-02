@@ -1,10 +1,10 @@
-# Flutter desktop prototype
+# Flutter app
 
-Step 2 of #330 (issue #387): one Flutter window with the overview and the
-nodes pages, plus the menu bar / tray icon, on Windows, macOS and Linux. It
-runs on the same client as the native apps (`crates/desktop`), through
-flutter_rust_bridge. It does not replace the native apps and is not part of
-any release.
+The desktop and mobile Flutter app, backed by the Rust client through
+flutter_rust_bridge. Desktop releases use this app. Android builds have
+separate Google Play and website APK distributions; the mobile tunnel host
+and current device-validation scope are described in
+[Mobile integration](../../docs/mobile.md).
 
 ## Layout
 
@@ -108,8 +108,9 @@ any release.
     session has no Secret Service.
 - The settings page (#401 step 3) sets the appearance, the language and
   the routing mode, and shows the account, the version and the system
-  service's status. Update checks and installing the service come in later
-  steps: their rows are shown, disabled.
+  service's status. Update controls are available when the build has an
+  updater or notice feed (see [Updates](#updates)). Website Android builds
+  expose the same version/update section from the sign-in page and Me.
 - Launch at login (#401 step 4) is the native apps' own, off by default,
   its state read from the system: `SMAppService.mainApp` on macOS, in the
   runner's Swift (`LoginItem` in `MainFlutterWindow.swift`, channel
@@ -146,20 +147,21 @@ any release.
   There are no emoji flags: platforms draw them differently, and Windows
   draws them as letters.
 - Not yet (to-dos on #387 and #401): the node search field and context
-  menu, the message rows' context menu, check for updates in the tray
-  (in-app update, #401 step 5).
+  menu, and the message rows' context menu.
 
 ## Building
 
-Builds and tests run only in CI (`ci.yml`, job `flutter`), on the three
-platforms, and only when `apps/flutter/` or `crates/desktop/` changes.
+CI builds the desktop app in the `flutter` job and mobile apps in `android`
+and `ios`. `tools/ci-changes.sh` selects the affected jobs, including the
+Android job when its updater test harness changes.
 `scripts/ci-build.sh` does the following:
 
 1. generates the platform runner (`flutter create`), copies `runner/<os>/`
    over it, gives it the native apps' identity (above), and keeps the window
    hidden until `main.dart` shows it on Windows and Linux;
 2. generates the bridge glue (`flutter_rust_bridge_codegen generate`);
-3. analyses the Dart code;
+3. analyses the Dart code and runs `flutter test checks/` (both are skipped
+   when `PPVPN_SKIP_ANALYZE=1`);
 4. builds the Rust library and the app in release mode, with the version
    and build number;
 5. copies the library into the bundle.
@@ -194,6 +196,46 @@ Pinned versions:
 | tray_manager | 0.8.0 | `pubspec.yaml` |
 | nativeapi | 0.5.2 | `pubspec.yaml` |
 | window_manager | 0.5.2 | `pubspec.yaml` |
+
+## Android distributions
+
+On Linux, set `FLUTTER_TARGET=android`, the Android SDK/NDK paths and
+`PPVPN_API_BASE_DEFAULT`, then run `scripts/ci-build.sh` with the Rust and
+Flutter toolchains used by CI. The script generates the runner and bridge,
+then selects both the native flavor and Dart's `PPVPN_ANDROID_CHANNEL`:
+
+| Build inputs | Distribution | Output under `apps/flutter/` |
+| --- | --- | --- |
+| `ANDROID_FORMAT=apk` (default) | `apk` by default | `build/app/outputs/flutter-apk/app-apk-release.apk` |
+| `ANDROID_FORMAT=aab` | `play` by default | `build/app/outputs/bundle/playRelease/app-play-release.aab` |
+| `ANDROID_FORMAT=apk ANDROID_DISTRIBUTION=play` | Play behavior in an APK for testing | `build/app/outputs/flutter-apk/app-play-release.apk` |
+
+`ANDROID_DISTRIBUTION` can explicitly be `play` or `apk`; AAB builds require
+`play`. Both use application ID `com.peakpassvpn.ppvpn`, minimum API 26 and
+arm64-v8a/x86_64. `PPVPN_BUILD_NUMBER` is the versionCode, with local zero
+mapped to 1. `scripts/android-distribution.py` generates the flavors and
+embeds `<PPVPN_UPDATE_SITE>/android/<PPVPN_RELEASE_CHANNEL>/latest.json`
+only in `apk`; without both values its updater is unavailable.
+
+Play's source set has no APK downloader, installer provider or install
+permission. Its UI hides external purchase and About links; message and
+notification links pass the same restricted origin/path policy in
+`lib/distribution.dart`. Missing or unknown Dart distribution metadata uses
+the Play policy. `apk` retains website behavior and the native updater.
+
+`ANDROID_KEYSTORE_FILE`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`
+and `ANDROID_KEY_PASSWORD` select the signing key; without a key the local
+build uses the template's debug key. Play AABs use the upload key. Published
+website APKs require the app-signing identity and pinned certificate
+described in [Android release configuration](../../docs/release.md#android-分发与签名).
+`scripts/check-android-signature.sh` checks AAB JAR signatures with `keytool`
+and APK signatures with `apksigner`, including APKs without a v1 signature.
+
+The native and workflow tests have a separate
+[runner and prerequisites](../../tools/desktop/ci/android-update-tests/README.md).
+Flutter's `checks/` tests cover Play link policy and the phone update UI;
+the emulator VPN smoke test selects `--flavor apk` and the matching Dart
+distribution explicitly.
 
 ## macOS packaging
 
@@ -294,8 +336,15 @@ From the native apps' feeds, as they update (`lib/updates.dart`):
   stable's on the update site) has a newer build than `PPVPN_VERSION` and
   `PPVPN_BUILD_NUMBER` baked into the bridge. A build without a build number
   or outside a package has no notice.
+- Website Android APK: initialized before the phone UI starts, including
+  while signed out. It checks after 15 seconds and every 24 hours, or from
+  Check for Updates. Download and Install opens Android's install permission
+  settings when needed; return and tap again after granting permission.
+  The native plugin checks the HTTPS origin, bytes, package/version and
+  installed signer before sharing a private-cache file with Android's
+  installer. The user confirms installation; Play builds use store updates.
 
-Builds without a feed (CI's, local ones) have updates off and no
+Builds without a feed have updates off and no
 「检查更新…」.
 
 ## Linux layout and the enhanced-mode end-to-end test
