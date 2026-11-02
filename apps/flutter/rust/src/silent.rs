@@ -1,5 +1,5 @@
 //! Silent updates on macOS and Windows (#548), around
-//! `ppvpn_desktop::silent_update`: the 「自动更新」 switch, the downloaded
+//! `ppvpn_client::silent_update`: the 「自动更新」 switch, the downloaded
 //! package, and what the app keeps between launches in
 //! `silent-update.json` in the data directory:
 //! - `auto_update`: the switch (absent before the first launch of a build
@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
-use ppvpn_desktop::silent_update::{
+use ppvpn_client::silent_update::{
     failure_kind, FailureKind, InstallAnswer, Latest, ServiceUpdates, SilentUpdater, UpdatePackage,
 };
 use serde::{Deserialize, Serialize};

@@ -392,8 +392,8 @@ mod tests {
     use super::*;
     use crate::core_ipc::{ApplyChoices, BoxFuture};
     use crate::service::{ServiceStatus, SessionRef, VersionInfo};
+    use crate::RoutingMode;
     use std::sync::{Arc, Mutex};
-    use RoutingMode;
 
     fn pointer() -> Value {
         serde_json::json!({
