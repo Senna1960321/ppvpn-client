@@ -269,6 +269,22 @@ class Updates {
     }
   }
 
+  /// Linux: there is a feed to check.
+  static bool get notices => _feed != null;
+
+  /// A check the user asked for: Sparkle's or WinSparkle's own windows, or
+  /// (Linux) the repository's latest.json.
+  static Future<void> check() async {
+    if (Platform.isMacOS) {
+      await _channel.invokeMethod<void>('check');
+    } else if (installs) {
+      rust.checkForUpdates();
+    } else if (notices) {
+      checked.value = null;
+      checked.value = await _checkFeed();
+    }
+  }
+
   static Future<void> setAutoUpdate(bool enabled) async {
     _saved = rust.setAutoUpdate(enabled: enabled);
     autoUpdate.value = enabled;
