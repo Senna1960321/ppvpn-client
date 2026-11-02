@@ -11,11 +11,13 @@ import 'dart:async';
 
 import 'package:flutter/widgets.dart';
 import 'package:forui/forui.dart';
+import 'package:window_manager/window_manager.dart';
 
 import '../app_state.dart';
 import '../src/rust/api.dart' as rust;
 import '../strings.dart';
 import '../theme.dart';
+import '../updates.dart';
 import '../widgets.dart';
 
 /// Busy phases: the switch shows its in-between state.
@@ -131,6 +133,11 @@ class OverviewPage extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
+              ValueListenableBuilder(
+                valueListenable: Updates.installed,
+                builder: (context, version, _) =>
+                    version == null ? const SizedBox.shrink() : _InstalledNotice(version: version),
+              ),
               Reveal(
                 child: snapshot.profile == rust.UiProfile.invalid
                     ? Column(
@@ -161,12 +168,79 @@ class OverviewPage extends StatelessWidget {
                   children: [
                     Expanded(child: TrafficCard(app: app)),
                     const SizedBox(width: Tokens.cardGap),
-                    Expanded(child: _LocalProxy(app: app, nodeId: snapshot.selectedNodeId)),
+                    Expanded(
+                      child: _LocalProxy(app: app, nodeId: snapshot.selectedNodeId),
+                    ),
                   ],
                 ),
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+class _InstalledNotice extends StatefulWidget {
+  const _InstalledNotice({required this.version});
+  final String version;
+
+  @override
+  State<_InstalledNotice> createState() => _InstalledNoticeState();
+}
+
+class _InstalledNoticeState extends State<_InstalledNotice> with WindowListener {
+  @override
+  void initState() {
+    super.initState();
+    windowManager.addListener(this);
+    WidgetsBinding.instance.addPostFrameCallback((_) => unawaited(_shown()));
+  }
+
+  Future<void> _shown() async {
+    if (!mounted) return;
+    try {
+      if (await windowManager.isVisible() && !await windowManager.isMinimized()
+          && await windowManager.isFocused() && mounted) await Updates.noticeShown();
+    } catch (_) {
+      /* A hidden/unavailable window does not consume the notice. */
+    }
+  }
+
+  @override
+  void onWindowFocus() => unawaited(_shown());
+
+  @override
+  void onWindowRestore() => unawaited(_shown());
+
+  @override
+  void dispose() {
+    windowManager.removeListener(this);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final t = Tokens.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: Tokens.cardGap),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+        decoration: BoxDecoration(
+          color: t.ok.withValues(alpha: 0.08),
+          borderRadius: BorderRadius.circular(Tokens.cardRadius),
+        ),
+        child: Row(
+          children: [
+            Expanded(child: Text(S.current('updatedTo', {'v': widget.version}), style: t.note)),
+            Button(
+              kind: ButtonKind.icon,
+              icon: FLucideIcons.x,
+              semanticsLabel: S.current('close'),
+              onPress: Updates.dismissInstalled,
+            ),
+          ],
         ),
       ),
     );

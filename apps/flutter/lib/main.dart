@@ -10,6 +10,7 @@
 
 import 'dart:async';
 import 'dart:io';
+import 'dart:ui' show AppExitResponse;
 
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
@@ -20,6 +21,7 @@ import 'package:window_manager/window_manager.dart';
 import 'activation.dart';
 import 'app_state.dart';
 import 'bench.dart';
+import 'desktop_updates.dart';
 import 'e2e.dart';
 import 'mobile.dart';
 import 'phone/phone.dart';
@@ -88,6 +90,28 @@ Future<void> main() async {
     return;
   }
 
+  Tray? tray;
+  final quitting = DesktopQuit(
+    hide: () async {
+      tray?.dispose();
+      await windowManager.hide();
+    },
+    cleanup: app.stop,
+    handoff: (manualInstaller) => Updates.onQuit(manualInstaller: manualInstaller),
+    exit: () async {
+      await windowManager.setPreventClose(false);
+      await windowManager.destroy();
+    },
+  );
+  // FlutterAppDelegate defers native Cmd-Q until this future responds. A
+  // tray quit and a native exit request share cleanup and one service RPC.
+  AppLifecycleListener(
+    onExitRequested: () async {
+      await quitting.prepare();
+      return AppExitResponse.exit;
+    },
+  );
+
   await windowManager.ensureInitialized();
   mark('window_manager_ready');
   await windowManager.waitUntilReadyToShow(
@@ -114,20 +138,24 @@ Future<void> main() async {
   );
   await windowManager.setPreventClose(true);
 
-  Future<void> quit() async {
-    app.stop();
-    await windowManager.setPreventClose(false);
-    await windowManager.destroy();
-  }
+  Future<void> quit() => quitting.quit();
 
   Future<void> open() async {
+    if (quitting.started) return;
     await windowManager.show();
     await windowManager.focus();
   }
 
   // Before the tray, whose menu offers a check where the app installs updates.
   if (samplePage == null) await Updates.start();
-  final tray = Tray(
+  if (quitting.started) return;
+  if (Updates.installing) {
+    app.stop();
+    runApp(PrototypeApp(app: app, installing: true));
+    unawaited(Future<void>.delayed(const Duration(seconds: 2), () => quitting.quit(manualInstaller: true)));
+    return;
+  }
+  tray = Tray(
     app: app,
     onOpen: () => unawaited(open()),
     onQuit: quit,
@@ -145,12 +173,19 @@ Future<void> main() async {
         if (await app.openPush(pushId)) await open();
       }()),
       // The installer is about to replace the app's files.
-      onQuit: () => unawaited(quit()),
+      onQuit: () {
+        Updates.manualInstallerStarted();
+        unawaited(quitting.quit(manualInstaller: true));
+      },
       // The update's installer runs: out of sight until it asks the app to quit.
-      onUpdate: () => unawaited(() async {
-        tray.dispose();
-        await windowManager.hide();
-      }()),
+      onUpdate: () {
+        quitting.manualInstallerStarted();
+        Updates.manualInstallerStarted();
+        unawaited(() async {
+          tray?.dispose();
+          await windowManager.hide();
+        }());
+      },
     );
   }
   unawaited(WidgetsBinding.instance.waitUntilFirstFrameRasterized.then((_) => mark('first_frame')));
@@ -162,12 +197,13 @@ class _HideOnClose with WindowListener {
 }
 
 class PrototypeApp extends StatefulWidget {
-  const PrototypeApp({super.key, required this.app, this.tray});
+  const PrototypeApp({super.key, required this.app, this.tray, this.installing = false});
 
   final AppState app;
 
   /// Held for the app's life; none on Android and iOS.
   final Tray? tray;
+  final bool installing;
 
   @override
   State<PrototypeApp> createState() => _PrototypeAppState();
@@ -226,18 +262,20 @@ class _PrototypeAppState extends State<PrototypeApp> {
               // desktop's.
               child: ColoredBox(
                 color: t.bg,
-                child: LayoutBuilder(
-                  builder: (context, box) => mobile
-                      ? Center(
-                          child: ConstrainedBox(
-                            constraints: const BoxConstraints(maxWidth: Tokens.phoneMaxWidth),
-                            child: PhoneShell(app: widget.app),
-                          ),
-                        )
-                      : box.maxWidth < Tokens.phoneBreakpoint
-                      ? PhoneShell(app: widget.app)
-                      : Shell(app: widget.app),
-                ),
+                child: widget.installing
+                    ? Center(child: Text(S.current('updateInstalling')))
+                    : LayoutBuilder(
+                        builder: (context, box) => mobile
+                            ? Center(
+                                child: ConstrainedBox(
+                                  constraints: const BoxConstraints(maxWidth: Tokens.phoneMaxWidth),
+                                  child: PhoneShell(app: widget.app),
+                                ),
+                              )
+                            : box.maxWidth < Tokens.phoneBreakpoint
+                            ? PhoneShell(app: widget.app)
+                            : Shell(app: widget.app),
+                      ),
               ),
             ),
           );

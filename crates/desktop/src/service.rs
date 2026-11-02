@@ -56,6 +56,10 @@ const AUTH_RENEW_MARGIN_SECS: u64 = 15;
 // Protocol types (mirror service/src/protocol.rs)
 // ---------------------------------------------------------------------------
 
+#[cfg(test)]
+#[path = "service/update_tests.rs"]
+mod update_tests;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Command {
     Handshake,
@@ -67,6 +71,8 @@ pub(crate) enum Command {
     Disconnect,
     CoreApi,
     Watch,
+    /// Copies and validates an app-downloaded installer before acknowledging.
+    InstallUpdate,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,6 +161,39 @@ pub(crate) struct VersionInfo {
     /// The service's build id; `None` from older services.
     #[serde(default)]
     pub build_id: Option<String>,
+    /// Absent from services that predate silent desktop updates.
+    #[serde(default)]
+    pub build: Option<u64>,
+    #[serde(default)]
+    pub update: Option<UpdateProgress>,
+    #[serde(default)]
+    pub last_update: Option<UpdateResult>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct UpdateProgress {
+    pub version: String,
+    pub build: u64,
+    pub phase: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct UpdateResult {
+    pub version: String,
+    pub build: u64,
+    pub outcome: String,
+    pub error: Option<String>,
+    pub finished_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct InstallUpdatePayload {
+    pub path: String,
+    pub version: String,
+    pub build: u64,
+    pub length: u64,
+    pub ed_signature: String,
+    pub relaunch: bool,
 }
 
 /// Build id of the service shipped with this client (build.rs: SHA-256 of
@@ -696,6 +735,25 @@ impl Default for ServiceClient {
 }
 
 impl ServiceClient {
+    pub(crate) async fn install_update(
+        &self,
+        payload: InstallUpdatePayload,
+    ) -> Result<(), ServiceError> {
+        // Copying and platform signature verification can take longer than
+        // normal service calls. A missing/invalid acknowledgement is not success.
+        let data = self
+            .call(
+                Command::InstallUpdate,
+                encode(payload)?,
+                Duration::from_secs(60),
+            )
+            .await?;
+        if data.get("accepted").and_then(Value::as_bool) != Some(true) {
+            return Err(ServiceError::Protocol("update was not accepted".into()));
+        }
+        Ok(())
+    }
+
     pub(crate) fn new(endpoint: impl Into<String>) -> Self {
         Self {
             endpoint: endpoint.into(),

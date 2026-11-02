@@ -709,3 +709,51 @@ pub fn check_for_updates() {
 pub fn set_auto_check_updates(enabled: bool) -> Result<(), String> {
     crate::update::set_auto_check(enabled)
 }
+
+/// Stable macOS/Windows builds only. Package bytes remain unprivileged;
+/// the service verifies its private copy before it ever runs an installer.
+#[derive(Clone, Debug)]
+pub struct UiDesktopUpdater {
+    pub feed: String,
+    pub platform: String,
+    pub version: String,
+    pub build: u64,
+    pub state_dir: String,
+}
+
+#[frb(sync)]
+pub fn desktop_updater() -> Result<Option<UiDesktopUpdater>, String> {
+    crate::update::desktop_config()
+}
+
+#[frb(sync)]
+pub fn auto_update_preference(enabled: Option<bool>, legacy: bool) -> Result<bool, String> {
+    crate::settings::auto_update(enabled, legacy)
+}
+
+#[frb(sync)]
+pub fn set_update_prompt_checks(enabled: bool) {
+    crate::update::set_prompt_checks(enabled);
+}
+
+pub async fn service_update_status() -> Result<String, String> {
+    bridge::get()?
+        .fetch(|client| async move { client.service_update_status().await })
+        .await
+}
+
+pub async fn install_update(
+    path: String,
+    version: String,
+    build: u64,
+    length: u64,
+    ed_signature: String,
+) -> Result<(), String> {
+    bridge::get()?
+        .call(move |client| async move {
+            client
+                .install_update(path, version, build, length, ed_signature)
+                .await
+        })
+        .await
+}

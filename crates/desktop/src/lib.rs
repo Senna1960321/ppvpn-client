@@ -953,6 +953,45 @@ impl Client {
     pub fn shutdown(&self) {
         self.shutdown_cores();
     }
+
+    /// The authenticated service's silent-update capability, progress and
+    /// result. Older services omit `build` and are not update-capable.
+    pub async fn service_update_status(&self) -> Result<String, ClientError> {
+        use service::ServiceApi;
+        let fail = |detail| ClientError::failed(ErrorCode::ServiceUnavailable, detail);
+        let status = service::ServiceClient::default()
+            .get_version()
+            .await
+            .map_err(|error| fail(error.detail()))?;
+        serde_json::to_string(&status).map_err(|error| fail(error.to_string()))
+    }
+
+    /// Natural app quit only, after normal proxy/core cleanup. The service
+    /// validates the cached package, waits for this process to exit, and
+    /// installs without relaunching an app the user explicitly quit.
+    pub async fn install_update(
+        &self,
+        path: String,
+        version: String,
+        build: u64,
+        length: u64,
+        ed_signature: String,
+    ) -> Result<(), ClientError> {
+        if !self.is_shut_down() {
+            return Err(ClientError::failed(ErrorCode::ServiceBusy, "UPDATE_BUSY"));
+        }
+        service::ServiceClient::default()
+            .install_update(service::InstallUpdatePayload {
+                path,
+                version,
+                build,
+                length,
+                ed_signature,
+                relaunch: false,
+            })
+            .await
+            .map_err(|error| ClientError::failed(ErrorCode::ServiceUnavailable, error.detail()))
+    }
 }
 
 /// Path of the purchase page on the site root.

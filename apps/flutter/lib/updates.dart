@@ -18,6 +18,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
+import 'desktop_updates.dart';
 import 'src/rust/api.dart' as rust;
 
 const _channel = MethodChannel('ppvpn/update');
@@ -51,6 +52,14 @@ class Updates {
   /// Linux: the last check the user asked for.
   static final ValueNotifier<CheckResult?> checked = ValueNotifier(null);
 
+  /// Signed service result, kept until the overview is actually visible.
+  static final ValueNotifier<String?> installed = ValueNotifier(null);
+  static DesktopUpdates? _desktop;
+  static bool installing = false;
+  static bool get silent => _desktop != null;
+  static bool _noticeShown = false;
+  static Timer? _noticeTimer;
+
   static String? _feed;
   static String _build = '';
   static String _command = '';
@@ -65,6 +74,7 @@ class Updates {
       } on PlatformException catch (error) {
         debugPrint('updates: $error');
       }
+      await _startDesktop();
       return;
     }
     final updater = rust.startUpdater();
@@ -73,6 +83,7 @@ class Updates {
     _feed = updater.noticeFeed;
     _build = updater.build;
     _command = updater.upgradeCommand;
+    if (Platform.isWindows) await _startDesktop();
     if (_feed != null) {
       unawaited(() async {
         await Future<void>.delayed(const Duration(seconds: 15));
@@ -90,6 +101,7 @@ class Updates {
   /// A check the user asked for: Sparkle's or WinSparkle's own windows, or
   /// (Linux) the repository's latest.json.
   static Future<void> check() async {
+    await _desktop?.manualCheck();
     if (Platform.isMacOS) {
       await _channel.invokeMethod<void>('check');
     } else if (installs) {
@@ -102,6 +114,12 @@ class Updates {
 
   static Future<void> setAutoCheck(bool enabled) async {
     try {
+      if (_desktop case final desktop?) {
+        rust.autoUpdatePreference(enabled: enabled, legacy: autoCheck.value ?? true);
+        autoCheck.value = enabled;
+        await desktop.setEnabled(enabled);
+        return;
+      }
       if (Platform.isMacOS) {
         await _channel.invokeMethod<void>('setAutoCheck', enabled);
       } else {
@@ -111,6 +129,101 @@ class Updates {
     } catch (error) {
       debugPrint('updates: $error');
     }
+  }
+
+  static Future<void> _promptChecks(bool enabled) async {
+    if (Platform.isMacOS) {
+      await _channel.invokeMethod<void>('setPromptChecks', enabled);
+    } else {
+      rust.setUpdatePromptChecks(enabled: enabled);
+    }
+  }
+
+  static Future<void> _startDesktop() async {
+    if (!installs) return;
+    try {
+      final config = rust.desktopUpdater();
+      if (config == null) {
+        // Development/old feed-only builds keep the original updater.
+        await _promptChecks(autoCheck.value ?? true);
+        return;
+      }
+      final enabled = rust.autoUpdatePreference(enabled: null, legacy: autoCheck.value ?? true);
+      autoCheck.value = enabled;
+      final desktop = DesktopUpdates(
+        config: DesktopUpdateConfig(
+          feed: Uri.parse(config.feed),
+          platform: config.platform,
+          version: config.version,
+          build: config.build.toInt(),
+          directory: Directory(config.stateDir),
+        ),
+        enabled: enabled,
+        status: () async => jsonDecode(await rust.serviceUpdateStatus()) as Map<String, dynamic>,
+        install: (package, path) async {
+          await rust.installUpdate(
+            path: path,
+            version: package.version,
+            build: BigInt.from(package.build),
+            length: BigInt.from(package.length),
+            edSignature: package.signature,
+          );
+          if (Platform.isMacOS) {
+            // The service has accepted; let the bundled push agent exit
+            // cleanly before its bundle is replaced. It registers on the
+            // next normal launch. Failure still must not prevent quit.
+            try {
+              await _channel.invokeMethod<void>('prepareForUpdate').timeout(const Duration(seconds: 2));
+            } catch (error) {
+              debugPrint('update agent cleanup: $error');
+            }
+          }
+        },
+        prompts: _promptChecks,
+        onInstalled: (version) => installed.value = version,
+      );
+      _desktop = desktop;
+      installing = !await desktop.start();
+    } catch (error) {
+      debugPrint('desktop updates: $error');
+      await _promptChecks(true);
+    }
+  }
+
+  static Future<void> onQuit({bool manualInstaller = false}) async {
+    final desktop = _desktop;
+    if (desktop == null) return;
+    if (!desktop.hasReadyPackage) {
+      await desktop.onQuit(manualInstaller: manualInstaller);
+      return;
+    }
+    if (Platform.isMacOS && !manualInstaller) {
+      try {
+        manualInstaller = await _channel.invokeMethod<bool>('isInstalling').timeout(const Duration(seconds: 2)) == true;
+      } catch (_) {
+        /* Missing native updater: service checks its capability. */
+      }
+    }
+    await desktop.onQuit(manualInstaller: manualInstaller);
+  }
+
+  static void manualInstallerStarted() => _desktop?.manualInstallerStarted();
+
+  static Future<void> noticeShown() async {
+    if (_noticeShown || installed.value == null) return;
+    _noticeShown = true;
+    try {
+      await _desktop?.noticeShown();
+    } catch (error) {
+      debugPrint('update notice: $error');
+    }
+    _noticeTimer = Timer(const Duration(seconds: 10), dismissInstalled);
+  }
+
+  static void dismissInstalled() {
+    unawaited(noticeShown());
+    _noticeTimer?.cancel();
+    installed.value = null;
   }
 
   static Future<CheckResult> _checkFeed() async {

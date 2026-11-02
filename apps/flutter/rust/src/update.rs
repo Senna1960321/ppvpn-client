@@ -63,6 +63,53 @@ pub(crate) fn start() -> UiUpdater {
     platform::start()
 }
 
+pub(crate) fn desktop_config() -> Result<Option<crate::api::UiDesktopUpdater>, String> {
+    if !cfg!(any(windows, target_os = "macos"))
+        || baked(option_env!("PPVPN_RELEASE_CHANNEL")) != Some("stable")
+    {
+        return Ok(None);
+    }
+    let Some(site) = baked(option_env!("PPVPN_UPDATE_SITE")) else {
+        return Ok(None);
+    };
+    if !site.starts_with("https://") {
+        return Ok(None);
+    }
+    let platform = if cfg!(windows) {
+        "windows-x64"
+    } else if cfg!(target_arch = "aarch64") {
+        "macos-arm64"
+    } else {
+        "macos-x64"
+    };
+    let build = baked(option_env!("PPVPN_BUILD_NUMBER"))
+        .unwrap_or("0")
+        .parse()
+        .map_err(|_| "invalid compiled update build number")?;
+    let (data, _) = crate::dirs::dirs()?;
+    Ok(Some(crate::api::UiDesktopUpdater {
+        feed: format!(
+            "{}/desktop/channels/stable.json",
+            site.trim_end_matches('/')
+        ),
+        platform: platform.into(),
+        version: version().into(),
+        build,
+        state_dir: std::path::Path::new(&data)
+            .join("desktop-updates")
+            .to_string_lossy()
+            .into(),
+    }))
+}
+
+/// The visible preference is stored separately by `auto_update_preference`.
+pub(crate) fn set_prompt_checks(enabled: bool) {
+    #[cfg(windows)]
+    platform::set_auto_check(enabled);
+    #[cfg(not(windows))]
+    let _ = enabled;
+}
+
 /// See [`crate::api::check_for_updates`].
 pub(crate) fn check() {
     #[cfg(windows)]
@@ -296,7 +343,15 @@ mod platform {
             );
             (winsparkle.set_app_build_version)(wide(&build).as_ptr());
             (winsparkle.set_registry_path)(registry.as_ptr());
-            (winsparkle.set_automatic_check_for_updates)(auto_check.into());
+            // The stable app first migrates its preference and probes the
+            // service. It then enables prompts only when silent updates are
+            // unavailable or disabled; do not race that decision at startup.
+            let prompt_checks = if super::desktop_config().ok().flatten().is_some() {
+                false
+            } else {
+                auto_check
+            };
+            (winsparkle.set_automatic_check_for_updates)(prompt_checks.into());
             (winsparkle.set_can_shutdown_callback)(can_shutdown);
             (winsparkle.set_shutdown_request_callback)(shutdown_requested);
             (winsparkle.set_error_callback)(failed);

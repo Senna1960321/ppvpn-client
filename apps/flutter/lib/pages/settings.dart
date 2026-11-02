@@ -329,10 +329,11 @@ class _Version extends StatelessWidget {
               ? const SizedBox.shrink()
               : SettingRow(
                   icon: FLucideIcons.calendarClock,
-                  title: s('autoUpdate'),
+                  title: s(Updates.silent ? 'autoUpdate' : 'autoCheckUpdates'),
+                  description: Updates.silent ? s('autoUpdateDesc') : null,
                   divider: true,
                   trailing: TriSwitch(
-                    label: s('autoUpdate'),
+                    label: s(Updates.silent ? 'autoUpdate' : 'autoCheckUpdates'),
                     state: autoCheck ? SwitchState.on : SwitchState.off,
                     onChanged: (enabled) => unawaited(Updates.setAutoCheck(enabled)),
                   ),

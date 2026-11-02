@@ -247,3 +247,18 @@ pub(crate) fn set_auto_check_updates(enabled: bool) -> Result<(), String> {
     json.insert("AutoCheckUpdates".into(), enabled.into());
     write_json(&path, &json)
 }
+
+/// Separate from Sparkle/WinSparkle's scheduled-prompt flag. Temporarily
+/// disabling that flag must not overwrite the user's automatic-update choice.
+pub(crate) fn auto_update(enabled: Option<bool>, legacy: bool) -> Result<bool, String> {
+    let (data, _) = dirs()?;
+    let path = PathBuf::from(data).join("auto-update-preference.json");
+    let mut json = read_json(&path);
+    let saved = json.get("enabled").and_then(Value::as_bool);
+    let value = enabled.or(saved).unwrap_or(legacy);
+    if enabled.is_some() || saved.is_none() {
+        json.insert("enabled".into(), value.into());
+        write_json(&path, &json)?;
+    }
+    Ok(value)
+}

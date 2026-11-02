@@ -405,13 +405,16 @@ private let updateLog = Logger(subsystem: "com.peakpassvpn.ppvpn.desktop", categ
 /// alone) has updates off, with no 「检查更新…」.
 ///
 /// Channel ppvpn/update: `state` → {available, autoCheck}, `check`,
-/// `setAutoCheck` (a Bool).
+/// `setAutoCheck` (a Bool), `setPromptChecks` (temporary scheduling),
+/// `isInstalling`, `prepareForUpdate` (accepted service handoff).
 @MainActor
 private final class Updater: NSObject {
   private let channel: FlutterMethodChannel
   private let feedURL: String?
   private let beforeInstall: @MainActor () -> Void
   private var controller: SparkleUpdaterController?
+  private var started = false
+  private var installing = false
 
   init(messenger: FlutterBinaryMessenger, beforeInstall: @escaping @MainActor () -> Void) {
     channel = FlutterMethodChannel(name: "ppvpn/update", binaryMessenger: messenger)
@@ -433,12 +436,19 @@ private final class Updater: NSObject {
         result(["available": self.controller != nil,
                 "autoCheck": self.controller?.updater.automaticallyChecksForUpdates ?? false])
       case "check":
+        self.startUpdater()
         self.controller?.checkForUpdates(nil)
         result(nil)
-      case "setAutoCheck":
+      case "setAutoCheck", "setPromptChecks":
         if let enabled = call.arguments as? Bool {
           self.controller?.updater.automaticallyChecksForUpdates = enabled
         }
+        self.startUpdater()
+        result(nil)
+      case "isInstalling":
+        result(self.installing)
+      case "prepareForUpdate":
+        self.beforeInstall()
         result(nil)
       default:
         result(FlutterMethodNotImplemented)
@@ -446,7 +456,13 @@ private final class Updater: NSObject {
     }
   }
 
-  /// SPUStandardUpdaterController from the bundled framework, started.
+  private func startUpdater() {
+    guard !started, let controller else { return }
+    started = controller.updater.startUpdater(nil)
+  }
+
+  /// Created without scheduling yet: Dart first migrates the user's choice,
+  /// then selects silent service updates or the existing prompt fallback.
   private static func makeController(delegate: AnyObject) -> SparkleUpdaterController? {
     guard let url = Bundle.main.privateFrameworksURL?.appendingPathComponent("Sparkle.framework"),
       let bundle = Bundle(url: url), bundle.load(),
@@ -461,7 +477,7 @@ private final class Updater: NSObject {
     class_addProtocol(controllerClass, SparkleUpdaterController.self)
     class_addProtocol(updaterClass, SparkleUpdater.self)
     guard let type = controllerClass as? SparkleUpdaterController.Type else { return nil }
-    let controller = type.init(startingUpdater: true, updaterDelegate: delegate, userDriverDelegate: nil)
+    let controller = type.init(startingUpdater: false, updaterDelegate: delegate, userDriverDelegate: nil)
     updateLog.info("updates on")
     return controller
   }
@@ -477,6 +493,7 @@ private final class Updater: NSObject {
   nonisolated func updater(_ updater: AnyObject, willInstallUpdate item: AnyObject) {
     MainActor.assumeIsolated {
       updateLog.info("update: installing")
+      installing = true
       beforeInstall()
     }
   }
@@ -492,4 +509,5 @@ private final class Updater: NSObject {
 /// What the runner calls of SPUUpdater.
 @objc private protocol SparkleUpdater: NSObjectProtocol {
   var automaticallyChecksForUpdates: Bool { get set }
+  func startUpdater(_ error: AutoreleasingUnsafeMutablePointer<NSError?>?) -> Bool
 }
