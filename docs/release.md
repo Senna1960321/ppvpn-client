@@ -31,8 +31,10 @@
     没有更新签名；macOS 的安装包和 CLI 只构建 arm64，x86_64 只在手动触发的运行里构建，#459），
     deb 和 rpm 各在固定的 Ubuntu、Fedora 镜像里离线安装一次（依赖包来自缓存），apt/dnf 仓库自测（`linux-smoke`、`linux-repo`）；依赖变了时保存
     `ci.yml` 恢复的构建缓存（`cache-*`）。什么都不发布。
-  - 手动触发：`channel=stable` 在 tag `vX.Y.Z` 上、经 `desktop-release-approval` 审批后，在
-    `desktop-release-stable` 里构建并签名，`release-files` 整体核对，`publish` 发 GitHub Release（安装包和 CLI，
+  - 手动触发：`channel=stable` 在 tag `vX.Y.Z` 上，桌面应用、服务和 CLI 的无密钥构建先运行，不进入
+    `desktop-release-stable`；中间产物只保留一天，macOS CLI 的未签名 slice 由同一次运行的签名 job 读取。
+    `desktop-release-approval` 审批后才进入 `desktop-release-stable` 签名、公证和打包，
+    `release-files` 整体核对，`publish` 发 GitHub Release（安装包和 CLI，
     SHA256SUMS 和构建 provenance），`site` 按 Release 重建更新站点，`site-deploy` 把它上传到 R2。
     `channel=dev` 在 main 上、`desktop-release-dev` 里构建，从不发布。`channel=site` 经同一审批，只按已发布的
     Release 重建并上传更新站点。
@@ -73,8 +75,15 @@ Azure Artifact Signing 给程序、安装包和卸载程序签 Authenticode（#4
 | `PPVPN_WINDOWS_PUBLISHER_EKU` | 服务的发布者钉：签名证书的身份 EKU（`1.3.6.1.4.1.311.97.*`，[安全](security.md)） |
 
 `PPVPN_WINDOWS_PUBLISHER_EKU` 在第一次签名的 dev 构建之后才设：那次构建的日志（`check-publisher.ps1`）
-打印签名证书的主题和 EKU。设上之前，签过名的构建里的服务照未签名构建那样接受安装目录里的客户端；设上之后
-打包时先核对签名符合这个钉，服务也只接受符合的客户端。
+打印签名证书的主题和 EKU。dev 在设上之前仍可用于取得这个钉；stable 必须设好，缺失时构建失败，不能退回接受未签名客户端。
+
+stable 的服务在审批前编译，所以 **仓库变量**也必须设置 `PPVPN_WINDOWS_PUBLISHER_EKU`，以及启用轮换时的
+`PPVPN_WINDOWS_NEXT_PUBLISHER_EKU`。它们是公开的证书身份，不是密钥；Azure 登录配置仍只放在发布环境里。
+环境里若保留同名 EKU 变量，必须与仓库值一致。服务产物记录编译时的两个钉和是否接受未签名客户端，
+打包阶段逐项核对，再核对程序签名；值不一致直接停止，不重编服务或降低校验要求。
+
+`tools/cli/build-release.sh macos` 默认仍一次构建并打包。流水线用 `PPVPN_CLI_STAGE=build` 只编译 slice，
+审批后用 `PPVPN_CLI_STAGE=package` 消费同一次运行的 slice；后一步不编译，仍核对版本、架构、签名和公证。
 
 ## 更新站点（R2）
 
