@@ -6,7 +6,7 @@
 
 ## 1. 总则
 
-- **形态**：`ppvpn-core` 是 Rust 库，宿主从源码编译并直接链接它，在自己的进程里运行。没有 IPC，也没有会话密钥。宿主之间的进程边界由宿主自己负责，例如 desktop 的 client ↔ service IPC。
+- **形态**：`ppvpn-core` 是 Rust 库，宿主从源码编译并直接链接它，在自己的进程里运行。没有 IPC，也没有会话密钥。宿主之间的进程边界由宿主自己负责，例如 desktop 的 client ↔ service IPC；其中的静默更新请求例外地写在第 16 节。
 - **版本**：遵循 crate 的 semver。1.0 之前，破坏性变更升中间位版本号（0.x → 0.(x+1)），这和 Sail 的约定一致。状态、事件和错误的枚举在同一个版本内**只增加、不修改**，并且都标了 `#[non_exhaustive]`，所以宿主遇到不认识的取值必须能容忍。
 - **能映射到 FFI**：本接口要能直接包装成 C ABI 或 JNI（移动端的隧道宿主就是这样包装的，第 11 节），所以公开 API 遵守下面几条：
   - 公开类型都是值类型，能用 serde 序列化成 JSON，字段名用 snake_case；
@@ -590,3 +590,89 @@ iOS 和 Android 上，引擎运行在系统要求的隧道进程里：Android �
   - `ppvpn-account` 的错误分三类：暂时性错误、无可用服务、需要重新登录；
   - Profile 只放内存，`state_dir` 不保存 Profile 原文（第 4.6 节、第 9 节）。
 - **Desktop H**：Backend 确认 `default_node_id` 一定存在，并且固定为 `nodes[0]`；有实例的入口一个都渲染不出来时返回错误，`nodes` 为空时返回 404，不会下发残缺或空的 Profile。已写进第 4.1 节和第 9 节（第 9 节附了后端 404 和 500 的口径）。
+
+## 16. 桌面特权服务：静默更新（#548）
+
+本节不属于 `ppvpn-core` 的 API，是 desktop 的 client ↔ service IPC（`crates/service/src/protocol.rs`）里的一个新请求。因为它改变了服务以 root（macOS）或 SYSTEM（Windows）身份做的事，按 #548 的决定写在这里，和其他契约一起评审。Linux、CLI 和手机不在范围内。
+
+### 16.1 分工
+
+- **应用**：照旧读更新源，把安装包下载到自己的缓存目录，在下面两种时机发 `InstallUpdate`，绝不断开连接。失败计数、回退到提示、界面文案都在应用这边（#548）。
+  - **退出时**：用户退出应用，`relaunch=false`（重新打开用户刚关掉的应用会让人意外）。应用先立刻隐藏窗口和托盘图标，再等回答；没有回答也照常退出。
+  - **空闲时**：没有连接，也没有打开的窗口，只剩托盘图标。`relaunch=true`，应用收到 `accepted` 后退出。重新打开时不带参数，回到只有托盘图标的状态由应用自己处理。
+- **服务**：把安装包复制到只有它能写的目录，在副本上做全部核验，等发请求的应用进程退出后安装，按需要重新打开应用，再换上新版本自己的服务。它不访问网络，也不读更新源。
+- **核验不依赖应用**：请求只能来自通过客户端身份核验的应用（`docs/security.md`），但服务不因此信任请求里的文件和版本：签名、长度和版本都在副本上自己核对。
+
+### 16.2 请求
+
+`Command::InstallUpdate`，和其他命令一样签名，`payload`：
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `path` | string | 应用下载好的安装包的绝对路径 |
+| `version` | string | 更新源里的版本，如 `0.7.5` |
+| `build` | u64 | 更新源里的构建号 |
+| `length` | u64 | 更新源里的长度（字节） |
+| `ed_signature` | string | 更新源里安装包的 EdDSA 签名（base64） |
+| `relaunch` | bool | 安装后是否在应用原来的用户会话里重新打开它，见 16.1 |
+
+安装包和签名的来源：
+
+- **Windows**：appcast 和频道指针里现有的 `setup.exe` 及其 `ed_signature`、`length`，安装参数是 `/S`。
+- **macOS**：Sparkle 现在用的 DMG 不变（手动"检查更新…"和回退还用它）。静默更新用 `.pkg`。发布已经给 pkg 签 Developer ID Installer、公证并装订公证票据（`package-app.sh`），这里另需：给 pkg 也做 EdDSA 签名，频道指针 `desktop/channels/stable.json` 的 macOS 平台项另加 `install_file`、`install_url`、`install_length`、`install_ed_signature`（发布元数据里已有 `install_file`、`install_length`）。这项发布改动和服务一起做，在服务之前合入。
+
+### 16.3 服务的处理
+
+依次检查，任何一步不过就以对应的错误码回答（`success=false`），不安装，暂存的副本删掉：
+
+1. **能不能装**：
+   - 这个构建没有编进 EdDSA 公钥（`PPVPN_SPARKLE_PUBLIC_KEY`）或构建号（`PPVPN_BUILD_NUMBER`，开发构建为 0），或者是 Linux：`UPDATE_UNSUPPORTED`。
+   - 正在停止：和其他命令一样拒绝。
+   - 已经接受了一次还没装完：`UPDATE_IN_PROGRESS`。
+   - 服务里有正在运行的核心（任何会话）：`UPDATE_BUSY`。
+2. **不降级**：`build` 不大于服务自己的构建号：`UPDATE_NOT_NEWER`。
+3. **复制**：用 `O_NOFOLLOW`（Windows 用 `FILE_FLAG_OPEN_REPARSE_POINT`）打开 `path`，在同一个句柄上检查它是普通文件、大小等于 `length` 且不超过 1 GiB，再从这个句柄复制，不先按路径 stat 再打开；不符合就是 `UPDATE_FILE_INVALID`。副本放在只有 root/SYSTEM 可写的暂存目录（macOS `/Library/Application Support/PPVPN/updates`，Windows `%ProgramData%\PPVPN\updates`），以下各步只看副本。
+4. **EdDSA**：用编进服务的公钥核对副本和 `ed_signature`（和 Sparkle、WinSparkle 同一把钥匙）：`UPDATE_SIGNATURE_INVALID`。
+5. **平台签名**，规则和服务认客户端相同：
+   - macOS：Gatekeeper 接受这个安装包（`spctl --assess --type install`，即已公证），而且签名者是 `macos_team_id` 那个 Team 的 Developer ID Installer。
+   - Windows：`WinVerifyTrust` 通过，叶证书满足发布者钉（主题 O 和身份 EKU，#489）。
+   - 不过：`UPDATE_PUBLISHER_MISMATCH`。
+6. **版本属于这个文件**：macOS 安装包 PackageInfo 的 `version`（`package-app.sh` 写的是构建号）等于 `build`；Windows 安装包的 FileVersion 等于 `<version>.<build>`。不等：`UPDATE_VERSION_MISMATCH`。
+
+都通过后回答 `{"accepted": true}`。复制和核验可能要几秒，应用对这个请求的等待上限是 60 秒。
+
+**回答之前连接断了**（应用退出、崩溃或不再等待）：丢弃这次请求，删掉副本，不安装，也不记结果。所以对应用来说，没有收到 `accepted` 就等于没装。
+
+### 16.4 安装
+
+- **独立进程**：安装由服务另起的进程执行，不在服务的 launchd 作业或 Windows 服务进程里，所以服务在安装中被停止、替换都不影响它。
+- **等应用退出**：等的是这条连接的对端进程，不用 payload 里的任何值：macOS 从连接的 audit token 取，Windows 用 `GetNamedPipeClientProcessId` 再打开一个进程句柄。等待挂在这个 audit token 或句柄上，所以 PID 被复用也不会认错。最多等 60 秒，还没退出就记为失败（`UPDATE_CLIENT_STILL_RUNNING`），不装。退出后再查一次没有运行中的核心，有则记为 `UPDATE_BUSY`。
+- **安装**：
+  - macOS：`installer -pkg <副本> -target /`。pkg 的 postinstall 照旧把应用包交给控制台用户。成功后按 `docs/security.md` 的规则核对新应用包里的 `ppvpn-service-install`，再运行它换上新版本的服务（它会停掉旧服务，所以也在独立进程里）。
+  - Windows：`<副本> /S`。安装程序自己停止、替换并重启服务。它以 SYSTEM 运行，不会自己重新打开应用。
+  - 安装上限 10 分钟，超时结束安装进程，记为失败。
+- **重新打开**：只在 `relaunch=true` 时，在应用原来所属的用户会话里打开应用，没有额外参数：macOS 用该用户的 `launchctl asuser`，Windows 用该会话的用户令牌（`WTSQueryUserToken`），以普通完整性级别运行。安装成功打开新版本，失败打开旧版本，让用户回到原来的状态。`relaunch=false` 时成功和失败都不打开。推送代理按应用启动时的规则恢复。
+- **睡眠和注销**：
+  - 机器睡眠时，等待和安装的计时都暂停，唤醒后继续。
+  - 用户注销时应用随之退出，安装照常进行。原来的会话已经不在时跳过重新打开，结果仍按安装本身记录。
+- **清理**：结束后删掉暂存的副本。
+
+### 16.5 结果
+
+- `GetVersion` 的应答加三个字段（老版本的服务没有，应用当作"不支持静默更新"）：
+  - `build`：服务自己的构建号。
+  - `update`：正在进行的安装，没有时为 null：`{ "version", "build", "phase": "waiting" | "installing" }`。`waiting` 是在等应用退出，`installing` 是安装程序在运行。安装最长 10 分钟，这期间用户可能手动打开旧版本的应用；应用看到这个字段就显示"正在安装更新"，不连接，然后退出。
+  - `last_update`：最近一次结果，没有时为 null：`{ "version", "build", "outcome": "installed" | "failed", "error", "finished_at_ms" }`。它只记录给出 `accepted` 之后的结果，写在暂存目录里，服务重启后仍在。`error` 是 16.4 的错误码，或 `UPDATE_INSTALL_FAILED`（附安装程序的退出码）。
+- **应用怎么用**：
+  - 按 `finished_at_ms` 去重，同一个结果只处理一次。
+  - `outcome` 是 `installed`，并且 `build` 等于应用自己的构建号：显示一次"已更新到 PPVPN {v}"。
+  - 失败按错误码处理：
+    - 计入这个版本的失败次数，同一版本 3 次后改回原来的提示（#548）：`UPDATE_FILE_INVALID`、`UPDATE_SIGNATURE_INVALID`、`UPDATE_PUBLISHER_MISMATCH`、`UPDATE_VERSION_MISMATCH`、`UPDATE_INSTALL_FAILED`。
+    - 不计入，下次空闲时再试：`UPDATE_BUSY`、`UPDATE_IN_PROGRESS`、`UPDATE_CLIENT_STILL_RUNNING`。
+    - 立即改回原来的提示：`UPDATE_UNSUPPORTED`、`UPDATE_NOT_NEWER`。
+  - 16.3 里在回答中直接给出的错误码按同样的分类处理。
+
+### 16.6 兼容
+
+- 老版本的服务不认识这个命令，不回答就关闭连接。应用把这种情况和 `UPDATE_UNSUPPORTED`、服务没装或没运行一样处理：回到原来的 Sparkle、WinSparkle 提示。
+- 新版本的应用遇到老服务时照旧在首次增强连接时替换服务（要管理员授权），之后的更新才是静默的。
