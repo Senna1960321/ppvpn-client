@@ -258,7 +258,7 @@ sing-box 就地重新加载，不重启实例，也不断开连接。状态每�
  "measured_at":"2026-07-23T12:00:00Z"}
 ```
 
-每个入口都被单独测量（`ingresses` 与 Profile 中的入口同序）。节点级 `success`/`latency_ms`/`error_code`/`endpoint_key`/`ingress_role` 描述同一个副本：primary 成功时取 primary；否则取最快的成功 backup；全部失败时报告 primary 的失败。成功时 `latency_ms` 至少为 1（四舍五入到毫秒），失败时为 0。
+每个入口都被单独测量（`ingresses` 与 Profile 中的入口同序）。节点级 `success`/`latency_ms`/`error_code`/`endpoint_key`/`ingress_role` 描述同一个副本：primary 成功时取 primary；否则取最快的成功 backup；全部失败时报告 primary 的失败。每个入口在 `timeout_ms` 内连续采样 3 次，`latency_ms` 取最快的一次，任一次成功即成功（#549）。成功时 `latency_ms` 至少为 1（四舍五入到毫秒），失败时为 0。
 
 ```json
 {"node_id":"hk-001","total_ms":241,"success":true,"http_status":204,"measured_at":"2026-07-23T12:00:01Z"}

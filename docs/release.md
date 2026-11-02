@@ -85,8 +85,12 @@ Azure Artifact Signing 给程序、安装包和卸载程序签 Authenticode（#4
 - 最新版本的 macOS 和 Windows 安装包 `desktop/stable/<版本>/<构建号>/<文件>`：appcast 的 enclosure 和频道指针的
   `url` 指向这里，而不是 GitHub Release（经 Cloudflare 缓存；GitHub 的下载在一些网络下很慢）。文件就是 Release
   里那份（`site` 先按 SHA256SUMS 和 provenance 校验），Sparkle/WinSparkle 再校验 EdDSA 签名；Release 里的
-  资产不动，旧的下载地址照旧可用。每个版本约 145 MB（两个 DMG 加 Windows 安装包；macOS 的 .pkg 只用于首次安装，
-  不在更新站点上）；
+  资产不动，旧的下载地址照旧可用；
+- 最新版本的 macOS `.pkg`（同一目录）：特权服务静默安装用它（#548，[宿主接入第 16 节](host-integration.md)）。
+  发布用 Sparkle 的同一把 EdDSA 钥匙给 pkg 签名（release-meta 的 `install_ed_signature`），频道指针的 macOS
+  平台项有 `install_file`、`install_url`、`install_length`、`install_sha256`、`install_ed_signature`。release-meta
+  里没有这个签名的版本（#548 以前）不放 pkg，指针也没有这些字段，应用照旧用 Sparkle 的提示。两个 DMG、两个 pkg
+  加 Windows 安装包，每个版本约 275 MB；
 - `linux/`：apt 仓库（`linux/apt`，suite `stable`，保留最近 5 个版本的 deb）、dnf 仓库（`linux/rpm/stable`，
   rpm 本身从 GitHub Release 下载）、安装源设置包、公钥和 `linux/stable/latest.json`（Linux 应用的更新检查）；
 - 已停用的 dev 频道：`linux/dev/latest.json` 和 `desktop/dev/appcast-<平台>.xml` 是 stable 的副本，让以前装的

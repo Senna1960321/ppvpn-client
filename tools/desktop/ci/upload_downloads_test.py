@@ -248,15 +248,17 @@ class UploadDownloads(unittest.TestCase):
                 for name, text in originals.items():
                     (self.release / name).write_text(text)
 
-    def add_packages(self):
-        """The first-install packages of a release from 0.6.2 on, in both macOS metas."""
+    def add_packages(self, signed=False):
+        """The first-install packages of a release from 0.6.2 on, in both macOS metas;
+        signed: with their EdDSA signatures, as releases from #548 on."""
         names = {}
         for platform in ("macos-arm64", "macos-x64"):
             name = PLATFORMS[platform].replace(".dmg", ".pkg")
             content = f"package of {platform}".encode()
             (self.release / name).write_bytes(content)
+            extra = {"install_ed_signature": f"signature of {name}"} if signed else {}
             self.write_meta(platform, install_file=name, install_length=len(content),
-                            install_sha256=hashlib.sha256(content).hexdigest())
+                            install_sha256=hashlib.sha256(content).hexdigest(), **extra)
             names[platform] = name
         return names
 
@@ -285,6 +287,32 @@ class UploadDownloads(unittest.TestCase):
         puts = self.calls("put-object")
         self.assertTrue(all(key.startswith(RELEASES) for key in puts[:12]), puts)
         self.assertTrue(all(key.startswith(POINTERS) for key in puts[12:]), puts)
+
+    def test_the_pointers_leave_out_the_packages_eddsa_signatures(self):
+        names = self.add_packages(signed=True)
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for platform, name in names.items():
+            source = json.loads((self.release / f"release-meta-{platform}.json").read_text())
+            pointer = json.loads((self.bucket / "objects" / POINTERS / f"release-meta-{platform}.json").read_text())
+            # The backend sees the three fields it knows; the release object keeps the signature.
+            del source["install_ed_signature"]
+            self.assertEqual(pointer, {
+                **source,
+                "path": f"{RELEASES}/{PLATFORMS[platform]}",
+                "install_path": f"{RELEASES}/{name}",
+            })
+            uploaded = json.loads((self.bucket / "objects" / RELEASES / f"release-meta-{platform}.json").read_text())
+            self.assertEqual(uploaded["install_ed_signature"], f"signature of {name}")
+
+    def test_an_empty_package_signature_is_refused(self):
+        self.add_packages(signed=True)
+        self.write_meta("macos-x64", install_ed_signature="")
+        for args in (("--plan",), ()):
+            result = self.run_script(*args)
+            self.assertNotEqual(result.returncode, 0, args)
+            self.assertIn("macos-x64: install_ed_signature is empty", result.stderr)
+            self.assertEqual(self.objects(), [])
 
     def test_install_fields_are_all_or_none_and_macos_only(self):
         names = self.add_packages()
