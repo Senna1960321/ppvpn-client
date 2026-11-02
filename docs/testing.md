@@ -79,7 +79,7 @@
 
 只有两个 workflow：`.github/workflows/ci.yml` 在 PR 推送时跑全部测试，`.github/workflows/release.yml` 在合入 main 时构建安装包（见 [release.md](./release.md)）。没有合并队列，没有定时运行。
 
-`ci.yml` 在每个 PR 的每次推送上并行跑 9 个 job。命名规则：与平台无关的 job 按它检查的内容命名（实际跑在 ubuntu 上，只是实现细节）；平台 job 以系统命名，只覆盖该系统自己的代码。
+`ci.yml` 在每个 PR 的每次推送上按变更范围并行运行下面这些 job。命名规则：与平台无关的 job 按它检查的内容命名（实际跑在 ubuntu 上，只是实现细节）；平台 job 以系统命名，只覆盖该系统自己的代码。
 
 | job | 内容 |
 |---|---|
@@ -87,11 +87,13 @@
 | `advisories` | cargo-deny（`deny.toml`）：Cargo.lock 对 RustSec 安全公告，以及依赖来源（只许 crates.io 和列出的 git 仓库，git 依赖要钉 tag 或 rev）。公告只在改了依赖的 PR（`tools/ci-changes.sh` 的 `deps`）上算失败，其他 PR 上是警告；暂时修不了的公告列在 `deny.toml` 的 `ignore` 里，写明原因和修复它的 issue 或 PR |
 | `unit` | L1（`make test-unit`） |
 | `integration` | L2（`make test-integration`），与 L1 并行 |
-| `desktop` | 桌面各层：特权 service、客户端 crate 和移动端隧道宿主（`crates/tunnel-host`，Linux 上）的测试与 clippy、桌面脚本、Swift 绑定和 AppLogic 测试 |
+| `desktop` | 桌面各层：特权 service、客户端 crate 和移动端隧道宿主（`crates/tunnel-host`，Linux 上）的测试与 clippy、桌面/Android 发布脚本、实际 release workflow 条件的 Node 测试、Swift 绑定和 AppLogic 测试 |
 | `linux` | Linux 自己的：网络命名空间里的 L3（`make test-system`：tun 及 G7、network-change），以及桌面增强模式端到端 |
 | `macos` | macOS 自己的：整个 workspace 在 aarch64 上的 clippy（x86_64 只检查 btls-sys 用的是预编译的 BoringSSL：我们没有按架构区分的代码，构建脚本要 Apple SDK，也搬不到 Linux 上）、macOS 平台测试（原生版 app 不再构建，#459） |
 | `windows` | Windows 自己的：桌面链接的 crate 在 MSVC 上的 clippy、Windows 平台测试、G7 Windows（原生版 app 已删除，#459、#522） |
-| `flutter` | Flutter 桌面 app（#401）在 Linux、macOS、Windows 上构建和冒烟测试，只在它或它构建所用的 crate（客户端、core、account、engine-host、service）变了的时候；`flutter analyze` 只在 Linux 上跑（#459） |
+| `flutter` | Flutter 桌面 app（#401）在 Linux、macOS、Windows 上构建和冒烟测试，只在它或它构建所用的 crate（客户端、core、account、engine-host、service）变了的时候；`flutter analyze` 和 `flutter test checks/` 只在 Linux 上跑（#459） |
+| `android` | Android APK 构建、真实更新插件的 Robolectric 与签名工具测试、模拟器 VPN 冒烟测试。Flutter、隧道宿主或 `tools/desktop/ci/android-update-tests/` 变化时运行 |
+| `ios` | iOS 模拟器应用构建和冒烟测试 |
 | `tunnel (ios)` | 移动端隧道宿主给 iOS 网络扩展的 XCFramework（#448，`crates/tunnel-host/scripts/build-xcframework.sh`），PR 上只构建真机一片（网络扩展不在模拟器里运行；完整的 XCFramework 由 `release.yml` 给 TestFlight 构建）。只在隧道宿主、engine-host、依赖、ci.yml 或只有 iOS 才编译的 core 代码变了的时候（`tools/ci-changes.sh` 的 `tunnel`），因为 macOS runner 很少。冷构建约 25 分钟，Rust 缓存用自己的 `tunnel` 键 |
 | `tunnel (android)` | 移动端隧道宿主给 Android VpnService 的 `libppvpn_tunnel.so`（#448，`crates/tunnel-host/scripts/build-android.sh`），PR 上只构建 arm64-v8a，并对 Android 目标跑 clippy（JNI 绑定只在 Android 上编译）。触发条件同 `tunnel (ios)`，跑在 Linux runner 上，不缓存 |
 
@@ -100,6 +102,13 @@ L1 和 L2 只跑一遍（`unit`、`integration`）；`macos`、`windows` 不重�
 只改了 `docs/` 或 Markdown 的 PR，各 job 照样运行并报告，但都跳过构建和测试步骤（`tools/ci-changes.sh` 的 `code`）；`lint` 仍做敏感信息检查，`advisories` 照常检查（只读 Cargo.lock，约一分钟）。
 
 手动重跑：`gh workflow run ci.yml --ref <分支>`（`windows` 的 G7 Windows 这时跑 5 遍）。
+
+### Android 分发与更新测试
+
+- `tools/desktop/ci/android_distribution_test.py` 执行实际 flavor 生成、构建和冒烟脚本中的命令，验证参数、产物路径及 CI 范围；`android_release_test.py` 和 `upload_site_test.py` 执行实际打包、站点构建及上传脚本，验证 APK/PKG 收集、拒绝时不写文件、不可变对象和上传顺序。运行整个 Python 集合需要 Python 3.11+ 和 Linux 的 Bash（上传脚本用关联数组，macOS 自带的 Bash 3 不支持）：`python3 -m unittest discover -s tools/desktop/ci -p '*_test.py'`。
+- `tools/desktop/ci/android-update-tests/` 用生成的真实 Gradle flavors 编译生产 Kotlin 源码及 manifest，Robolectric 在 API 26/35 上运行 APK 插件、API 35 上核对 Play 排除安装能力；临时密钥配合真实 `apksigner`、`keytool`、`apkanalyzer` 检查签名和打包。Node 测试用 GitHub 的表达式求值器运行实际 workflow 条件。依赖和运行命令见[测试 runner](../tools/desktop/ci/android-update-tests/README.md)。
+- `apps/flutter/checks/` 的 `flutter test checks/` 覆盖 Play 链接策略、未登录时的更新入口，以及使用应用实际字体的 320 px 更新状态界面。先由 `scripts/ci-build.sh` 准备 Flutter 依赖和 FRB 生成代码；该脚本在分析 Dart 时一并运行这些测试。
+- 真机验收仍需覆盖：Play 页面入口限制、首次启动与自动检查时序、Flutter/native 通道上的失败重试、未知来源权限返回、完整的同签名升级及账号保留、后台/旋转与真实网络超时。受控的 HTTPS 响应、PackageManager fixture 和 widget 状态不代替这条完整流程。
 
 ### 平台测试
 
