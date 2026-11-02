@@ -78,6 +78,8 @@ Future<void> main() async {
     Settings.load();
     // In the tray also when the service opened the app again after an
     // idle silent update (#548).
+    // The service opened the app again after the user had quit it (#548).
+    if (!mobile && rust.quitAfterRelaunch()) exit(0);
     background = rust.startedInBackground() || (!mobile && rust.startHidden());
     rust.refreshLaunchAtLogin();
     app = AppState(rust.start());
@@ -141,13 +143,12 @@ Future<void> main() async {
   // the window and the tray are gone and the cores stopped (#548); not
   // when an installer asks the app to quit.
   Future<void> quit({bool update = true}) async {
+    // Out of sight at once: what follows may take a minute.
+    tray?.dispose();
+    await windowManager.hide();
     // An idle install the service accepted meanwhile stands: nothing to send.
     final accepted = await Updates.quitting();
     final install = update && !accepted && Updates.readyAtQuit;
-    if (install) {
-      tray?.dispose();
-      await windowManager.hide();
-    }
     app.stop();
     if (install) await Updates.installAtQuit();
     await windowManager.setPreventClose(false);
@@ -165,9 +166,7 @@ Future<void> main() async {
       // Nothing connected and no window: only the tray. A minimised
       // window counts as open.
       idle: () async =>
-          _notConnected.contains(app.snapshot.value.phase) &&
-          !await windowManager.isVisible() &&
-          !await windowManager.isMinimized(),
+          _notConnected(app.snapshot.value) && !await windowManager.isVisible() && !await windowManager.isMinimized(),
       quit: () => quit(update: false),
     );
   }
@@ -185,7 +184,10 @@ Future<void> main() async {
   runApp(PrototypeApp(app: app, tray: shown));
   if (samplePage == null) {
     listenForActivations(
-      onShow: () => unawaited(open()),
+      // Not while the service may be opening the app again (#548).
+      onShow: () {
+        if (!Updates.ignoreShows) unawaited(open());
+      },
       onPush: (pushId) => unawaited(() async {
         if (await app.openPush(pushId)) await open();
       }()),
@@ -217,8 +219,15 @@ class _QuitOnClose with WindowListener {
   void onWindowClose() => quit();
 }
 
-/// Phases with nothing connected: an idle silent update may go ahead.
-const _notConnected = {rust.UiPhase.off, rust.UiPhase.error, rust.UiPhase.contended};
+/// Nothing connected: an idle silent update may go ahead. An error or a
+/// contended path counts only in enhanced mode, where the service refuses
+/// while its core runs; in compatible mode the standard core may still
+/// serve the system proxy or its port after an error.
+bool _notConnected(rust.UiSnapshot snapshot) => switch (snapshot.phase) {
+  rust.UiPhase.off => true,
+  rust.UiPhase.error || rust.UiPhase.contended => snapshot.connectionMode == rust.UiConnectionMode.enhanced,
+  _ => false,
+};
 
 class PrototypeApp extends StatefulWidget {
   const PrototypeApp({super.key, required this.app, this.tray, this.installing});

@@ -778,3 +778,17 @@ pub fn start_hidden() -> bool {
 pub fn clear_start_hidden() {
     crate::silent::clear_start_hidden();
 }
+
+/// The user quit while an idle install's request was out, and the service
+/// accepted it: marked so that the app it opens again quits.
+#[frb(sync)]
+pub fn mark_user_quit() {
+    crate::silent::mark_user_quit();
+}
+
+/// The service opened the app again after the user had quit it: it quits
+/// at once. Clears the mark.
+#[frb(sync)]
+pub fn quit_after_relaunch() -> bool {
+    crate::silent::quit_after_relaunch()
+}

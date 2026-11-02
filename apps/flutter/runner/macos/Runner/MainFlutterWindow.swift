@@ -85,13 +85,24 @@ private final class Activation: NSObject {
     }
   }
 
+  private var quitting = false
+
+  /// Once: Dart quits within `quitLimit` (handing over a silent update
+  /// waits at most a minute for the service), else the app terminates.
   @objc private func quit(_ sender: Any?) {
-    if ready {
-      channel.invokeMethod("activate", arguments: "quit")
-    } else {
+    guard ready else {
       NSApp.terminate(sender)
+      return
+    }
+    guard !quitting else { return }
+    quitting = true
+    channel.invokeMethod("activate", arguments: "quit")
+    DispatchQueue.main.asyncAfter(deadline: .now() + Activation.quitLimit) {
+      NSApp.terminate(nil)
     }
   }
+
+  private static let quitLimit: TimeInterval = 90
 
   @objc private func willFinishLaunching(_ notification: Notification) {
     let events = NSAppleEventManager.shared()

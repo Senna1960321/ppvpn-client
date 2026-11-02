@@ -12,7 +12,11 @@
 //! - `start_hidden_at_ms`: set before an idle install with `relaunch`, so
 //!   that the app the service opens again starts in the tray (section
 //!   16.1); a mark older than [`HIDDEN_FOR`] is stale (the service did not
-//!   open the app).
+//!   open the app);
+//! - `user_quit_at_ms`: the user quit while an idle install's request was
+//!   out and the service accepted it: the app it opens again quits at once;
+//! - `later_since_ms`: since when the channel could not be read or the
+//!   package downloaded; after [`LATER_FOR`] the app goes back to the prompt.
 //!
 //! A file that is there but unreadable reads as the switch on and its last
 //! result handled, never as the switch's first launch.
@@ -41,6 +45,8 @@ const MAX_FAILURES: u32 = 3;
 const MAX_RETRIES: u32 = 20;
 /// The service waits a minute for the app and installs for at most ten.
 const HIDDEN_FOR: Duration = Duration::from_secs(15 * 60);
+/// A channel unread this long goes back to the prompt.
+const LATER_FOR: Duration = Duration::from_secs(24 * 60 * 60);
 /// The app's own code for a download that failed its checks or stalled.
 const DOWNLOAD_FAILED: &str = "UPDATE_DOWNLOAD_FAILED";
 
@@ -58,6 +64,10 @@ struct Saved {
     given_up: Vec<u64>,
     #[serde(default)]
     start_hidden_at_ms: u64,
+    #[serde(default)]
+    user_quit_at_ms: u64,
+    #[serde(default)]
+    later_since_ms: u64,
 }
 
 impl Saved {
@@ -239,6 +249,53 @@ pub(crate) fn start_hidden() -> bool {
     at > 0 && now_ms().saturating_sub(at) < HIDDEN_FOR.as_millis() as u64
 }
 
+/// See [`crate::api::mark_user_quit`].
+pub(crate) fn mark_user_quit() {
+    update(|saved| saved.user_quit_at_ms = now_ms());
+}
+
+/// See [`crate::api::quit_after_relaunch`].
+pub(crate) fn quit_after_relaunch() -> bool {
+    let saved = load();
+    let fresh = |at: u64| at > 0 && now_ms().saturating_sub(at) < HIDDEN_FOR.as_millis() as u64;
+    if saved.user_quit_at_ms == 0 {
+        return false;
+    }
+    let quit = fresh(saved.start_hidden_at_ms) && fresh(saved.user_quit_at_ms);
+    update(|saved| {
+        saved.user_quit_at_ms = 0;
+        if quit {
+            saved.start_hidden_at_ms = 0;
+        }
+    });
+    quit
+}
+
+/// [`UiSilentPrepared::Later`], or the prompt once it has lasted
+/// [`LATER_FOR`].
+fn later() -> UiSilentPrepared {
+    let now = now_ms();
+    let mut since = now;
+    update(|saved| {
+        if saved.later_since_ms == 0 || saved.later_since_ms > now {
+            saved.later_since_ms = now;
+        }
+        since = saved.later_since_ms;
+    });
+    if now - since >= LATER_FOR.as_millis() as u64 {
+        UiSilentPrepared::Prompt
+    } else {
+        UiSilentPrepared::Later
+    }
+}
+
+/// The channel was read and the package, if any, is in hand.
+fn not_later() {
+    if load().later_since_ms != 0 {
+        update(|saved| saved.later_since_ms = 0);
+    }
+}
+
 /// See [`crate::api::clear_start_hidden`].
 pub(crate) fn clear_start_hidden() {
     if load().start_hidden_at_ms != 0 {
@@ -301,16 +358,19 @@ pub(crate) async fn prepare() -> UiSilentPrepared {
     let package = match updater.latest().await {
         Ok(Latest::Newer(package)) => package,
         Ok(Latest::UpToDate) => {
+            not_later();
             drop_package();
             return UiSilentPrepared::UpToDate;
         }
         Ok(Latest::NoPackage) => {
+            not_later();
             drop_package();
             return UiSilentPrepared::Prompt;
         }
+        // Unreachable, or an entry this app cannot use.
         Err(error) => {
             tracing::info!(%error, "silent update: no pointer");
-            return UiSilentPrepared::Later;
+            return later();
         }
     };
     if load().given_up.contains(&package.build) {
@@ -323,14 +383,18 @@ pub(crate) async fn prepare() -> UiSilentPrepared {
         .as_ref()
         .is_some_and(|(_, ready)| *ready == package);
     if ready {
+        not_later();
         return UiSilentPrepared::Ready;
     }
     match updater.download(&package).await {
         Ok(path) => {
             tracing::info!(version = %package.version, build = package.build, "silent update ready");
+            not_later();
             *READY.lock().unwrap() = Some((path, package));
             UiSilentPrepared::Ready
         }
+        // The switch went off meanwhile (which empties the cache): not counted.
+        Err(_) if load().auto_update == Some(false) => UiSilentPrepared::UpToDate,
         // Counted: three, and this build goes back to the prompt.
         Err(error) => {
             tracing::info!(%error, "silent update: download failed");
@@ -340,7 +404,7 @@ pub(crate) async fn prepare() -> UiSilentPrepared {
                 drop_package();
                 UiSilentPrepared::Prompt
             } else {
-                UiSilentPrepared::Later
+                later()
             }
         }
     }

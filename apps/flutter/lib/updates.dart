@@ -68,9 +68,6 @@ class Updates {
   /// The channel's release, as last prepared.
   static rust.UiSilentPrepared? _prepared;
 
-  /// Since when the channel could not be read or the package downloaded.
-  static DateTime? _laterSince;
-
   /// The switch is saved (a first launch's value too).
   static bool _saved = true;
 
@@ -82,6 +79,9 @@ class Updates {
 
   /// An idle install's request, while it is out.
   static Future<bool>? _idleRequest;
+
+  /// Until then another launch's activation is not shown (see [ignoreShows]).
+  static DateTime? _quietUntil;
 
   /// The app is idle: nothing connected and no window (main.dart).
   static Future<bool> Function() _idle = () async => false;
@@ -165,8 +165,8 @@ class Updates {
       autoUpdate.value == true &&
       _saved &&
       (_service?.available ?? false) &&
-      _prepared != rust.UiSilentPrepared.prompt &&
-      !(_laterSince != null && DateTime.now().difference(_laterSince!) > const Duration(days: 1));
+      // A day without the channel turns into the prompt (silent.rs).
+      _prepared != rust.UiSilentPrepared.prompt;
 
   /// Sparkle's or WinSparkle's scheduled checks (and their prompt): on
   /// unless the service installs silently.
@@ -211,11 +211,6 @@ class Updates {
       debugPrint('silent update: $error');
       _prepared = rust.UiSilentPrepared.later;
     }
-    if (_prepared == rust.UiSilentPrepared.later) {
-      _laterSince ??= DateTime.now();
-    } else {
-      _laterSince = null;
-    }
   }
 
   /// Hands the package to the service to install once the app exits, and
@@ -239,6 +234,9 @@ class Updates {
     if (!await _idle()) {
       rust.clearStartHidden();
       _prepared = null;
+      // The service waits a minute for the app to exit, then opens the app
+      // again, which comes here as another launch.
+      _quietUntil = DateTime.now().add(const Duration(seconds: 90));
       return false;
     }
     _quitting = true;
@@ -246,12 +244,20 @@ class Updates {
     return true;
   }
 
+  /// An idle install is out or was let go: another launch's activation is
+  /// the service opening the app again, not the user (main.dart).
+  static bool get ignoreShows =>
+      _idleRequest != null || (_quietUntil != null && DateTime.now().isBefore(_quietUntil!));
+
   /// Called first when the app quits: no idle install from now on. True
   /// when an idle install's request was out and the service accepted it:
-  /// [installAtQuit] has nothing to send.
+  /// [installAtQuit] has nothing to send, and the app the service opens
+  /// again quits at once (rust/src/silent.rs).
   static Future<bool> quitting() async {
     _quitting = true;
-    return await _idleRequest ?? false;
+    final accepted = await _idleRequest ?? false;
+    if (accepted) rust.markUserQuit();
+    return accepted;
   }
 
   /// A package is ready for [installAtQuit].
