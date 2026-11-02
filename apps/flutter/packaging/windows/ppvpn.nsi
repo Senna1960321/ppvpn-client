@@ -25,6 +25,8 @@
 ;   /S                silent (WinSparkle runs updates with /S); relaunches the
 ;                     app afterwards when it was running in this session
 ;                     (the push agent is relaunched whenever its Run value exists)
+;   /SERVICEUPDATE    service's /S update: refuse other running apps and leave
+;                     relaunch to the service in the original user's session
 ;   /DESKTOPSHORTCUT  (install) also create a desktop shortcut in silent mode
 ;   /PURGE            (uninstall) also remove per-user data in silent mode
 
@@ -96,12 +98,15 @@ ShowUninstDetails show
 !include "x64.nsh"
 !include "WinVer.nsh"
 !include "nsDialogs.nsh"
+!include "StrFunc.nsh"
+${StrStr}
 
 Var AppWasRunning     ; 1 when a ppvpn.exe in this session accepted the quit signal
 Var CreateDesktop     ; 1 to create the desktop shortcut
 Var DesktopCheckbox
 Var RemoveData        ; uninstall: 1 to remove per-user data
 Var DataCheckbox
+Var ServiceUpdate
 
 ; Relative paths resolve against this directory (makensis changes into it).
 !define MUI_ICON "AppIcon.ico"
@@ -356,6 +361,7 @@ FunctionEnd
 ; The installer runs elevated. Start the app through Explorer so it runs as
 ; the signed-in user at medium integrity, like a normal launch.
 Function LaunchApp
+  ${IfThen} $ServiceUpdate == 1 ${|} Return ${|}
   Exec '"$WINDIR\explorer.exe" "$INSTDIR\${APP_EXE}"'
 FunctionEnd
 
@@ -363,6 +369,7 @@ FunctionEnd
 ; in the Run value (the app writes it, the agent or a sign-out removes it).
 ; Bring it back after an upgrade stopped it, as the user, like the app.
 Function LaunchAgentIfEnabled
+  ${IfThen} $ServiceUpdate == 1 ${|} Return ${|}
   ReadRegStr $0 HKCU "${RUN_KEY}" "${AGENT_RUN_VALUE}"
   ${If} $0 != ""
   ${AndIf} ${FileExists} "$INSTDIR\${AGENT_EXE}"
@@ -407,6 +414,12 @@ Function .onInit
     StrCpy $CreateDesktop 1
   ${EndIf}
   ${GetParameters} $R0
+  StrCpy $ServiceUpdate 0
+  ClearErrors
+  ${GetOptions} $R0 "/SERVICEUPDATE" $R1
+  ${IfNot} ${Errors}
+    StrCpy $ServiceUpdate 1
+  ${EndIf}
   ClearErrors
   ${GetOptions} $R0 "/DESKTOPSHORTCUT" $R1
   ${IfNot} ${Errors}
@@ -435,7 +448,24 @@ Section "PPVPN" SecMain
   SetOutPath "$INSTDIR"
 
   ; 1. Release every file in $INSTDIR: the app, the push agent, the service and its core.
-  Call StopApp
+  ${If} $ServiceUpdate == 1
+    ; The authenticated initiating app has quit. Never kill another
+    ; session's app or launch UI from SYSTEM's session 0.
+    nsExec::ExecToStack '"$SYSDIR\tasklist.exe" /nh /fo csv /fi "imagename eq ${APP_EXE}"'
+    Pop $0
+    Pop $1
+    ${If} $0 != 0
+      SetErrorLevel 2
+      Abort
+    ${EndIf}
+    ${StrStr} $2 $1 '"${APP_EXE}"'
+    ${If} $2 != ""
+      SetErrorLevel 2
+      Abort
+    ${EndIf}
+  ${Else}
+    Call StopApp
+  ${EndIf}
   Call StopAgent
   Call StopService
   ; Then make sure they are released, before anything is changed: a process

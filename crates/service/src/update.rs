@@ -299,6 +299,40 @@ fn runner_running(staging: &Staging) -> bool {
     matches!(lock.try_lock(), Err(std::fs::TryLockError::WouldBlock))
 }
 
+/// Keep the update reservation locked through Connect's core mutation. Both
+/// paths take ACTIVE before CORE; checking status before taking CORE would
+/// leave a gap in which an installer can start beneath a new connection.
+pub fn guard_connect<T>(connect: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
+    guard_connect_in(Staging::system().as_ref(), connect)
+}
+
+fn guard_connect_in<T>(
+    staging: Option<&Staging>,
+    connect: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let active = ACTIVE.lock();
+    if active.is_some() {
+        anyhow::bail!(IN_PROGRESS);
+    }
+    // After a service replacement ACTIVE is empty, while the independent
+    // runner still owns the disk lock. A malformed job must not unblock it.
+    if let Some(staging) = staging {
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(staging.lock_path())
+        {
+            Ok(lock) => match lock.try_lock() {
+                Ok(()) => {}
+                Err(_) => anyhow::bail!(IN_PROGRESS),
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => anyhow::bail!(IN_PROGRESS),
+        }
+    }
+    connect()
+}
+
 /// With nothing in progress in this process (`ACTIVE` held and empty): a
 /// runner started by an earlier service process is in progress; anything
 /// else in current/ is removed, and an install cut short (the machine
@@ -979,9 +1013,58 @@ mod platform {
         }
     }
 
-    /// The pkg, then the new service from root-only copies of the app's
-    /// helpers, checked as docs/security.md says.
+    /// Keep the new helpers bound to the verified package. postinstall gives
+    /// /Applications/PPVPN.app to its user, so copying from that bundle after
+    /// installation would allow substitution of older, still-signed helpers.
+    pub(super) fn prepare_helpers(current: &Path, deadline: Duration) -> Result<PathBuf, String> {
+        let payload = current.join("payload");
+        let status = run_until(
+            Command::new("/usr/sbin/pkgutil")
+                .arg("--expand-full")
+                .arg(current.join(PACKAGE))
+                .arg(&payload),
+            deadline,
+        )?;
+        if !status.success() {
+            return Err(format!("pkgutil exit {}", exit_code(status)));
+        }
+        let new = current.join("new");
+        std::fs::create_dir(&new).map_err(|error| format!("create {}: {error}", new.display()))?;
+        let helpers = payload.join("Payload/PPVPN.app/Contents/MacOS");
+        for directory in helpers
+            .ancestors()
+            .take_while(|path| path.starts_with(&payload))
+        {
+            if !std::fs::symlink_metadata(directory)
+                .map_err(|error| format!("stat package directory: {error}"))?
+                .is_dir()
+            {
+                return Err("helper directory is not inside the package payload".into());
+            }
+        }
+        for (name, identifier) in [
+            ("ppvpn-service-install", crate::macsign::INSTALL_IDENTIFIER),
+            ("ppvpn-service", crate::macsign::SERVICE_IDENTIFIER),
+        ] {
+            let source = helpers.join(name);
+            if !std::fs::symlink_metadata(&source)
+                .map_err(|error| format!("stat {name}: {error}"))?
+                .is_file()
+            {
+                return Err(format!("{name}: not a regular package file"));
+            }
+            let target = new.join(name);
+            std::fs::copy(&source, &target).map_err(|error| format!("copy {name}: {error}"))?;
+            let requirement = crate::macsign::requirement(identifier, crate::macsign::team_id())
+                .map_err(|error| error.to_string())?;
+            crate::macsign::check_file(&target, &requirement)
+                .map_err(|error| format!("{name}: {error}"))?;
+        }
+        Ok(new)
+    }
+
     pub(super) fn install(current: &Path, deadline: Duration) -> Result<(), String> {
+        let new = prepare_helpers(current, deadline)?;
         let status = run_until(
             Command::new("/usr/sbin/installer")
                 .arg("-pkg")
@@ -992,21 +1075,7 @@ mod platform {
         if !status.success() {
             return Err(format!("installer exit {}", exit_code(status)));
         }
-        let new = current.join("new");
-        std::fs::create_dir(&new).map_err(|error| format!("create {}: {error}", new.display()))?;
-        let helpers = Path::new(INSTALLED_APP).join("Contents/MacOS");
-        for name in ["ppvpn-service-install", "ppvpn-service"] {
-            std::fs::copy(helpers.join(name), new.join(name))
-                .map_err(|error| format!("copy {name}: {error}"))?;
-        }
         let helper = new.join("ppvpn-service-install");
-        let requirement = crate::macsign::requirement(
-            crate::macsign::INSTALL_IDENTIFIER,
-            crate::macsign::team_id(),
-        )
-        .map_err(|error| error.to_string())?;
-        crate::macsign::check_file(&helper, &requirement)
-            .map_err(|error| format!("ppvpn-service-install: {error}"))?;
         let status = run_until(&mut Command::new(&helper), deadline)?;
         if !status.success() {
             return Err(format!("ppvpn-service-install exit {}", exit_code(status)));
@@ -1344,7 +1413,7 @@ mod platform {
     pub(super) fn install(current: &Path, deadline: Duration) -> Result<(), String> {
         let status = run_until(
             Command::new(current.join(PACKAGE))
-                .arg("/S")
+                .args(["/S", "/SERVICEUPDATE"])
                 .current_dir(current),
             deadline,
         )?;
@@ -1966,4 +2035,8 @@ mod tests {
         );
         assert_eq!(bundle_of(Path::new("/usr/local/bin/ppvpn")), None);
     }
+
+    include!("update_guard_tests.rs");
+    #[cfg(target_os = "macos")]
+    include!("update_macos_package_tests.rs");
 }
