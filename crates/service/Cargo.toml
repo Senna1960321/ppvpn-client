@@ -37,6 +37,10 @@ ppvpn-core = { path = "../core" }
 ppvpn-engine-host = { path = "../engine-host" }
 sysinfo = "0.32"
 uuid = { version = "1", features = ["v4"] }
+# Silent updates (src/update.rs): the update feed's Ed25519 signature, as
+# Sparkle and WinSparkle check it. Both are already in the tree (rustls).
+base64 = "0.22"
+ring = "0.17"
 
 [build-dependencies]
 sha2 = "0.10"
@@ -61,6 +65,13 @@ winapi = { version = "0.3", features = [
     "securitybaseapi",
     "minwinbase",
     "processthreadsapi",
+    "realtimeapiset",
+    "sddl",
+    "synchapi",
+    "fileapi",
+    "userenv",
+    "winver",
+    "wtsapi32",
     "guiddef",
     "softpub",
     "wincrypt",

@@ -30,6 +30,8 @@ use std::str::FromStr;
 pub const CLIENT_IDENTIFIER: &str = "com.peakpassvpn.ppvpn.desktop";
 /// The service binary's signing identifier (apps/macos/scripts/package-app.sh).
 pub const SERVICE_IDENTIFIER: &str = "com.peakpassvpn.ppvpn.service";
+/// ppvpn-service-install's, which a silent update runs (update.rs).
+pub const INSTALL_IDENTIFIER: &str = "com.peakpassvpn.ppvpn.service-install";
 
 const TEAM_ID: &str = include_str!("macos_team_id");
 
