@@ -87,7 +87,7 @@
 | `advisories` | cargo-deny（`deny.toml`）：Cargo.lock 对 RustSec 安全公告，以及依赖来源（只许 crates.io 和列出的 git 仓库，git 依赖要钉 tag 或 rev）。公告只在改了依赖的 PR（`tools/ci-changes.sh` 的 `deps`）上算失败，其他 PR 上是警告；暂时修不了的公告列在 `deny.toml` 的 `ignore` 里，写明原因和修复它的 issue 或 PR |
 | `unit` | L1（`make test-unit`） |
 | `integration` | L2（`make test-integration`），与 L1 并行 |
-| `desktop` | 桌面各层：特权 service、客户端 crate 和移动端隧道宿主（`crates/tunnel-host`，Linux 上）的测试与 clippy、桌面脚本、Swift 绑定和 AppLogic 测试 |
+| `desktop` | 桌面各层：特权 service、客户端 crate 和移动端隧道宿主（`crates/tunnel-host`，Linux 上）的测试与 clippy、桌面脚本、发布工作流条件和产物交接回归、Swift 绑定和 AppLogic 测试 |
 | `linux` | Linux 自己的：网络命名空间里的 L3（`make test-system`：tun 及 G7、network-change），以及桌面增强模式端到端 |
 | `macos` | macOS 自己的：整个 workspace 在 aarch64 上的 clippy（x86_64 只检查 btls-sys 用的是预编译的 BoringSSL：我们没有按架构区分的代码，构建脚本要 Apple SDK，也搬不到 Linux 上）、macOS 平台测试（原生版 app 不再构建，#459） |
 | `windows` | Windows 自己的：桌面链接的 crate 在 MSVC 上的 clippy、Windows 平台测试、G7 Windows（原生版 app 已删除，#459、#522） |
@@ -100,6 +100,17 @@ L1 和 L2 只跑一遍（`unit`、`integration`）；`macos`、`windows` 不重�
 只改了 `docs/` 或 Markdown 的 PR，各 job 照样运行并报告，但都跳过构建和测试步骤（`tools/ci-changes.sh` 的 `code`）；`lint` 仍做敏感信息检查，`advisories` 照常检查（只读 Cargo.lock，约一分钟）。
 
 手动重跑：`gh workflow run ci.yml --ref <分支>`（`windows` 的 G7 Windows 这时跑 5 遍）。
+
+桌面脚本和发布流程的回归在 `desktop` job 的 Ubuntu 24.04 上运行。复现这部分检查需要 Bash 4 及以上、Python 3、Node.js/npm 和 PowerShell 7（`pwsh`），从仓库根运行：
+
+```sh
+bash -n tools/desktop/*.sh tools/desktop/ci/*.sh
+python3 -m unittest discover -s tools/desktop/ci -p '*_test.py' -v
+npm ci --prefix tools/desktop/ci --ignore-scripts
+npm test --prefix tools/desktop/ci
+```
+
+Python 用例覆盖 CLI 的编译/打包交接，以及 Windows 服务产物的发布者钉和未签名模式校验；Windows 用例执行实际 PowerShell 打包脚本，以假编译产物替代 Cargo，不需要 Windows SDK 或签名凭据。本地可用 `PPVPN_TEST_PWSH` 指向便携版 PowerShell，缺少 PowerShell 会失败，不会跳过。Node 用例用 GitHub 的表达式求值器检查实际 `release.yml` 的审批条件、环境路由和保留期；依赖只装在 `tools/desktop/ci`，版本由它的 lockfile 固定。
 
 ### 平台测试
 

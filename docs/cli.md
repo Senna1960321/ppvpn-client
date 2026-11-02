@@ -232,6 +232,10 @@ Releases carry the CLI as tar.gz archives beside the desktop installers, in the 
 `tools/cli/build-release.sh` in `release.yml`. `crates/cli/README.md`, shipped in each archive, covers
 installing and verifying them.
 
+On macOS, the script defaults to building and packaging in one invocation. The release workflow sets
+`PPVPN_CLI_STAGE=build` to compile unsigned slices before stable approval, then `PPVPN_CLI_STAGE=package`
+to sign, notarize and archive those same slices without recompiling (see [Build and release](release.md#ci)).
+
 The shipped binary has no symbols, so a backtrace shows addresses only. Each platform's symbols are a separate
 file in the same release, `ppvpn-cli-<version>-<platform>.symbols.tar.gz`, under the same SHA256SUMS and build
 provenance: `ppvpn.debug` (Linux) and `ppvpn.dSYM` (macOS). To turn a frame's address into a function name,

@@ -10,7 +10,7 @@
 
 | Job | 运行环境 | 桌面端的内容 |
 | --- | --- | --- |
-| `desktop` | ubuntu-latest | 桌面各层，客户端 crate 只编译一次（`CARGO_BUILD_TARGET` 固定目标目录）：`crates/service`（进程内托管 TUN 引擎）的 `cargo test` 和 clippy（`-D warnings`）；`ppvpn-client` 的测试和 clippy（链接 Rust `ppvpn-core`、sail 和预编译 BoringSSL）；`bash -n` 和 `tools/desktop/ci` 的 Python 测试；Swift 绑定（`apps/macos/scripts/build-swift-linux.sh`，Swift 用 swift.org 的工具链并校验签名）和 macOS 推送代理的 `AppLogic` 测试（不含 AppKit） |
+| `desktop` | ubuntu-24.04 | 桌面各层，客户端 crate 只编译一次（`CARGO_BUILD_TARGET` 固定目标目录）：`crates/service`（进程内托管 TUN 引擎）的 `cargo test` 和 clippy（`-D warnings`）；`ppvpn-client` 的测试和 clippy（链接 Rust `ppvpn-core`、sail 和预编译 BoringSSL）；`bash -n` 和 `tools/desktop/ci` 的 Python、Node 测试（包括执行 PowerShell 的 Windows 服务交接用例，运行命令见[测试分层](../testing.md#ci-什么时候跑哪一层)）；Swift 绑定（`apps/macos/scripts/build-swift-linux.sh`，Swift 用 swift.org 的工具链并校验签名）和 macOS 推送代理的 `AppLogic` 测试（不含 AppKit） |
 | `linux` | ubuntu-latest | 增强模式端到端：以 root 运行特权 service，客户端 crate 经它连接和断开（`src/e2e_linux.rs`，feature `linux-e2e`），本地假后端和 Shadowsocks 节点（`test/fakenode`）；检查 TUN、策略路由、经节点的流量，以及断开后和 kill -9 后的清理 |
 | `macos` | macos-15 | 客户端和 service 在 aarch64、x86_64 上的 clippy；`ppvpn-client` 的平台测试（`detect`、`service`、`sysproxy`）；`bootstrap.sh` 之后用 `xcodebuild` 构建 Debug app（ad-hoc 签名，不嵌入 core 和 service） |
 | `windows` | windows-latest | 客户端和 service 在 MSVC 上的 clippy；`ppvpn-client` 的平台测试；G7 Windows。不打安装包，不签名 |
@@ -31,7 +31,8 @@
   （Windows 不签名、macOS ad-hoc 签名、没有更新签名），作为 workflow artifact；`linux-smoke` 把 deb 和 rpm 各离线安装一次（依赖包来自缓存，在 main 上保存），
   `linux-repo` 用这些包自测 apt/dnf 仓库。什么都不发布。
 - 手动触发 `channel=stable`：在 tag `vX.Y.Z`（0.6.0 及以后；桌面端、CLI 和引擎同一个版本、同一个 Release）上，
-  经 `desktop-release-approval` 审批，在 `desktop-release-stable` 里构建并签名，`release-files` 整体核对，
+  桌面应用、服务和 CLI 的无密钥构建先运行，不进入 `desktop-release-stable`，中间产物只保留一天。
+  经 `desktop-release-approval` 审批后，在 `desktop-release-stable` 里签名、公证和打包，`release-files` 整体核对，
   `publish` 发 GitHub Release，`site` 重建更新站点，`site-deploy` 上传到 R2（`https://pkg.peakpassvpn.com`）。
   `rehearsal` 只出草稿 Release 和站点 artifact `site`，不上传。
 - 手动触发 `channel=dev`：在 main 上、`desktop-release-dev` 里构建，从不发布。
