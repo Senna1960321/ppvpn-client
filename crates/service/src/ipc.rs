@@ -277,7 +277,7 @@ fn handle_with(req: Request, client_pid: u32, stopping: bool) -> Result<Response
                 Ok(p) => p,
                 Err(e) => return signed_error(req.id, format!("bad payload: {e}"), &auth.key),
             };
-            match CORE.lock().connect(payload, client_pid) {
+            match crate::update::guard_connect(|| CORE.lock().connect(payload, client_pid)) {
                 Ok(pid) => signed_ok(req.id, serde_json::json!({ "pid": pid }), &auth.key),
                 Err(e) => signed_error(req.id, e.to_string(), &auth.key),
             }
