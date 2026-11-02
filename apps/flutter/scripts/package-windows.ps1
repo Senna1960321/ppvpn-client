@@ -180,6 +180,16 @@ if ($ServiceDir) {
   if ($built -ne $env:PPVPN_WINDOWS_ALLOW_UNSIGNED_CLIENT) {
     throw "the service in $ServiceDir was built with PPVPN_WINDOWS_ALLOW_UNSIGNED_CLIENT=$built, this package with $env:PPVPN_WINDOWS_ALLOW_UNSIGNED_CLIENT"
   }
+  # Stable's compile reads repository variables before approval; packaging
+  # reads the release environment. Refuse a stale or shadowed publisher pin
+  # before signing an app the prebuilt service would reject.
+  foreach ($pin in @("PPVPN_WINDOWS_PUBLISHER_EKU", "PPVPN_WINDOWS_NEXT_PUBLISHER_EKU")) {
+    $recorded = [string](Get-Content -Raw -LiteralPath (Join-Path $serviceOut "$pin.txt"))
+    $expected = [string][Environment]::GetEnvironmentVariable($pin)
+    if ($recorded.Trim() -cne $expected.Trim()) {
+      throw "the prebuilt service's $pin differs from the packaging environment; keep the repository and environment pins in sync"
+    }
+  }
   foreach ($bin in $serviceBins) {
     $binVersion = Get-FileVersion (Join-Path $serviceOut "$bin.exe")
     if ($binVersion -ne $buildVersion) { throw "$ServiceDir\$bin.exe is $binVersion, not $buildVersion" }
@@ -202,6 +212,9 @@ if ($ServiceOnly) {
     Copy-Item -LiteralPath (Join-Path $serviceOut "$bin.exe") -Destination (Join-Path $OutDir "$bin.exe")
   }
   Write-Utf8NoBom (Join-Path $OutDir $serviceRecord) "$env:PPVPN_WINDOWS_ALLOW_UNSIGNED_CLIENT`n"
+  foreach ($pin in @("PPVPN_WINDOWS_PUBLISHER_EKU", "PPVPN_WINDOWS_NEXT_PUBLISHER_EKU")) {
+    Write-Utf8NoBom (Join-Path $OutDir "$pin.txt") "$([Environment]::GetEnvironmentVariable($pin))`n"
+  }
   Write-Host "service helpers: $OutDir"
   return
 }

@@ -501,7 +501,10 @@ jobs:
         if: steps.scope.outputs.code == 'true'
         run: |
           bash -n tools/desktop/*.sh tools/desktop/ci/*.sh
+          command -v pwsh
           python3 -m unittest discover -s tools/desktop/ci -p '*_test.py' -v
+          npm ci --prefix tools/desktop/ci --ignore-scripts
+          npm test --prefix tools/desktop/ci
       # swift.org's toolchain for the runner's Ubuntu, its signature checked
       # against swift.org's keys. Not cached: about 1 GB of the repository's
       # 20 GB, for about a minute of download.

@@ -22,6 +22,10 @@
 # one target named, that slice alone (never for stable).
 #
 # Environment:
+#   PPVPN_CLI_STAGE
+#                 macOS only: build compiles unsigned target slices and exits;
+#                 package signs and archives those slices without compiling.
+#                 The default, all, builds and packages in one invocation.
 #   CHANNEL       empty (a merge: the crate's version), dev or stable
 #   VERSION       x.y.z of a dev or stable run. stable: must be the crate's
 #                 version (Cargo.toml), or the build fails
@@ -40,6 +44,11 @@
 set -euo pipefail
 
 os=${1:?usage: $0 linux <target> | macos [<target>...]}
+stage_mode=${PPVPN_CLI_STAGE:-all}
+case "$os:$stage_mode" in
+linux:all | macos:all | macos:build | macos:package) ;;
+*) echo "build-release: invalid PPVPN_CLI_STAGE=$stage_mode for $os" >&2; exit 1 ;;
+esac
 cd "$(dirname "$0")/../.."
 root=$(pwd)
 work=$(mktemp -d)
@@ -127,7 +136,10 @@ macos)
 		x86_64-apple-darwin) archs+=(x86_64) ;;
 		*) fail "unsupported target $target" ;;
 		esac
-		cargo build --release --locked -p ppvpn-cli --target "$target"
+		if [ "$stage_mode" != package ]; then
+			cargo build --release --locked -p ppvpn-cli --target "$target"
+		fi
+		[ -f "target/$target/release/ppvpn" ] || fail "missing prebuilt CLI slice: $target"
 	done
 	case "${archs[*]}" in
 	"arm64 x86_64") platform=macos-universal ;;
@@ -135,6 +147,11 @@ macos)
 	*) fail "macos builds aarch64-apple-darwin, or it and x86_64-apple-darwin in that order" ;;
 	esac
 	[ "$platform" = macos-universal ] || [ "${CHANNEL:-}" != stable ] || fail "a stable build is universal"
+	if [ "$stage_mode" = build ]; then
+		# No certificate, keychain, notary or final archive is touched here.
+		rmdir "$work"
+		exit 0
+	fi
 	bin=$root/target/$platform/ppvpn
 	mkdir -p "$(dirname "$bin")"
 	slices=()
