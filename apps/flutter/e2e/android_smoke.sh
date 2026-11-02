@@ -73,6 +73,7 @@ leg() { # name
   local report="$PWD/build/smoke-$1.json" status=0 unfinished ran bad
   rm -f "$report"
   flutter test integration_test/mobile_smoke_test.dart -d "$device" \
+    --flavor apk --dart-define=PPVPN_ANDROID_CHANNEL=apk \
     --file-reporter "json:$report" || status=$?
   [ "$status" -eq 0 ] && return
   [ -s "$report" ] || { echo "$1: flutter test exited $status, no report" >&2; exit 1; }

@@ -158,7 +158,7 @@ class _General extends StatelessWidget {
           ),
         ),
         const _LaunchAtLogin(),
-        const _Version(),
+        const VersionSettings(),
       ],
     );
   }
@@ -261,8 +261,8 @@ class _LaunchAtLoginState extends State<_LaunchAtLogin> with WindowListener {
 /// The version, with 「检查更新…」 where the app checks; the
 /// automatic-check switch where it installs updates; on Linux the newer
 /// build's notice with the upgrade command, and how a check ended.
-class _Version extends StatelessWidget {
-  const _Version();
+class VersionSettings extends StatelessWidget {
+  const VersionSettings({super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -270,26 +270,35 @@ class _Version extends StatelessWidget {
     final s = S.current;
     return Column(
       children: [
-        SettingRow(
-          icon: FLucideIcons.info,
-          title: s('versionT'),
-          divider: true,
-          trailing: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              _Value(Settings.version.isEmpty ? '—' : Settings.version, mono: true),
-              if (Updates.installs || Updates.notices) ...[
-                const SizedBox(width: 8),
-                Button(
-                  kind: ButtonKind.text,
-                  height: Tokens.smallButtonHeight,
-                  fontSize: 12,
-                  label: s('checkUpdates'),
-                  onPress: () => unawaited(Updates.check()),
+        LayoutBuilder(
+          builder: (context, constraints) {
+            final narrow = constraints.maxWidth < 420;
+            final canCheck = Updates.installs || Updates.notices;
+            final checkButton = Button(
+              kind: ButtonKind.text,
+              height: Tokens.smallButtonHeight,
+              fontSize: 12,
+              label: s('checkUpdates'),
+              onPress: () => unawaited(Updates.check()),
+            );
+            return Column(
+              children: [
+                SettingRow(
+                  icon: FLucideIcons.info,
+                  title: s('versionT'),
+                  divider: true,
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      _Value(Settings.version.isEmpty ? '—' : Settings.version, mono: true),
+                      if (canCheck && !narrow) ...[const SizedBox(width: 8), checkButton],
+                    ],
+                  ),
                 ),
+                if (canCheck && narrow) _SubRow(children: [const Spacer(), checkButton]),
               ],
-            ],
-          ),
+            );
+          },
         ),
         ValueListenableBuilder(
           valueListenable: Updates.notice,
@@ -297,9 +306,15 @@ class _Version extends StatelessWidget {
               ? ValueListenableBuilder(
                   valueListenable: Updates.checked,
                   builder: (context, checked, _) => switch (checked) {
-                    CheckResult.upToDate => _SubRow(children: [Text(s('upToDate'), style: t.note)]),
+                    CheckResult.upToDate => _SubRow(
+                      children: [Expanded(child: Text(s('upToDate'), style: t.note))],
+                    ),
                     CheckResult.failed => _SubRow(
-                      children: [Text(s('updCheckFailT'), style: t.note.copyWith(color: t.bad))],
+                      children: [
+                        Expanded(
+                          child: Text(s('updCheckFailT'), style: t.note.copyWith(color: t.bad)),
+                        ),
+                      ],
                     ),
                     _ => const SizedBox.shrink(),
                   },
@@ -313,15 +328,48 @@ class _Version extends StatelessWidget {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(s('updAvailT', {'v': notice.version}), style: t.note),
-                          Text(s('updAvailD'), style: t.note),
-                          Text(notice.command, style: t.monoText(12, color: t.t2)),
+                          if (notice.command != null) ...[
+                            Text(s('updAvailD'), style: t.note),
+                            Text(notice.command!, style: t.monoText(12, color: t.t2)),
+                          ],
                         ],
                       ),
                     ),
                     const SizedBox(width: 8),
-                    CopyButton(text: notice.command, label: s('copyCommand')),
+                    if (notice.command != null)
+                      CopyButton(text: notice.command!, label: s('copyCommand'))
+                    else
+                      ValueListenableBuilder(
+                        valueListenable: Updates.busy,
+                        builder: (context, busy, _) => Button(
+                          kind: ButtonKind.primary,
+                          label: s(busy ? 'apkDownloading' : 'apkInstall'),
+                          onPress: busy ? null : () => unawaited(Updates.installApk()),
+                        ),
+                      ),
                   ],
                 ),
+        ),
+        ValueListenableBuilder(
+          valueListenable: Updates.installPermission,
+          builder: (context, needed, _) => needed
+              ? _SubRow(
+                  children: [Expanded(child: Text(s('apkPermission'), style: t.note))],
+                )
+              : const SizedBox.shrink(),
+        ),
+        ValueListenableBuilder(
+          valueListenable: Updates.checked,
+          builder: (context, checked, _) =>
+              checked == CheckResult.failed && Updates.notice.value?.command == null && Updates.notice.value != null
+              ? _SubRow(
+                  children: [
+                    Expanded(
+                      child: Text(s('apkInstallFailed'), style: t.note.copyWith(color: t.bad)),
+                    ),
+                  ],
+                )
+              : const SizedBox.shrink(),
         ),
         ValueListenableBuilder(
           valueListenable: Updates.autoCheck,

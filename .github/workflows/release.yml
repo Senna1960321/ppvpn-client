@@ -1360,6 +1360,7 @@ jobs:
         env:
           FLUTTER_TARGET: android
           ANDROID_FORMAT: aab
+          ANDROID_DISTRIBUTION: play
           ANDROID_KEYSTORE_PASSWORD: ${{ env.SIGNED == 'true' && secrets.ANDROID_UPLOAD_KEYSTORE_PASSWORD || '' }}
           ANDROID_KEY_ALIAS: ${{ env.SIGNED == 'true' && secrets.ANDROID_UPLOAD_KEY_ALIAS || '' }}
           ANDROID_KEY_PASSWORD: ${{ env.SIGNED == 'true' && secrets.ANDROID_UPLOAD_KEY_PASSWORD || '' }}
@@ -1388,6 +1389,86 @@ jobs:
           if-no-files-found: error
           retention-days: 3
           path: ${{ steps.build.outputs.bundle }}
+
+  # Website APKs use Play's APP-signing identity, not necessarily its upload
+  # key. Enable only after that public SHA-256 pin and the matching key are
+  # configured. Historical releases without an APK remain publishable.
+  android-apk:
+    name: android-apk
+    needs: [prepare, approve]
+    if: >-
+      !cancelled() && needs.prepare.result == 'success' && needs.approve.result == 'success' &&
+      needs.prepare.outputs.channel == 'stable' && vars.ANDROID_APK_SIGNER_SHA256 != ''
+    runs-on: ubuntu-latest
+    environment: desktop-release-stable
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    env:
+      PPVPN_VERSION: ${{ needs.prepare.outputs.version }}
+      PPVPN_BUILD_NUMBER: ${{ needs.prepare.outputs.build_number }}
+      PPVPN_RELEASE_CHANNEL: stable
+      PPVPN_API_BASE_DEFAULT: ${{ vars.PPVPN_API_BASE }}
+      ANDROID_APK_SIGNER_SHA256: ${{ vars.ANDROID_APK_SIGNER_SHA256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
+        with:
+          toolchain: 1.98.1
+          targets: aarch64-linux-android,x86_64-linux-android
+      - uses: ./.github/actions/prebuilt-boringssl
+        with:
+          targets: x86_64-unknown-linux-gnu aarch64-linux-android x86_64-linux-android
+      - uses: ./.github/actions/flutter-toolchain
+      - uses: ./.github/actions/cargo-home
+      - name: No test-only features
+        run: |
+          for target in aarch64-linux-android x86_64-linux-android; do
+            tools/release-features-check.sh --target "$target" -p ppvpn-flutter
+            tools/release-features-check.sh --target "$target" -p ppvpn-tunnel-host
+          done
+      - name: App signing key
+        env:
+          KEYSTORE: ${{ secrets.ANDROID_APK_KEYSTORE }}
+        run: |
+          [ -n "$KEYSTORE" ] || { echo "ANDROID_APK_KEYSTORE is required when APK publishing is enabled" >&2; exit 1; }
+          keystore="$RUNNER_TEMP/apk-signing.jks"
+          (umask 077 && base64 -d <<<"$KEYSTORE" > "$keystore")
+          echo "ANDROID_KEYSTORE_FILE=$keystore" >> "$GITHUB_ENV"
+      - id: build
+        name: Build the website APK
+        env:
+          FLUTTER_TARGET: android
+          ANDROID_FORMAT: apk
+          ANDROID_DISTRIBUTION: apk
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_APK_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_APK_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_APK_KEY_PASSWORD }}
+        run: |
+          export JAVA_HOME="$JAVA_HOME_17_X64"
+          export ANDROID_NDK_HOME="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}"
+          apps/flutter/scripts/ci-build.sh
+      - name: Verify signer and package metadata
+        env:
+          APK: ${{ steps.build.outputs.bundle }}
+        run: |
+          export JAVA_HOME="$JAVA_HOME_17_X64"
+          export PATH="$JAVA_HOME/bin:$PATH"
+          apksigner=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -1)
+          apkanalyzer=$(find "$ANDROID_HOME/cmdline-tools" -name apkanalyzer | sort -V | tail -1)
+          python3 tools/desktop/ci/android_release.py --apk "$APK" --out dist/android \
+            --version "$PPVPN_VERSION" --build "$PPVPN_BUILD_NUMBER" \
+            --signer-sha256 "$ANDROID_APK_SIGNER_SHA256" --apksigner "$apksigner" --apkanalyzer "$apkanalyzer"
+      - name: Remove the app signing key
+        if: always() && env.ANDROID_KEYSTORE_FILE != ''
+        run: rm -f "$ANDROID_KEYSTORE_FILE"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: android-apk
+          if-no-files-found: error
+          retention-days: 1
+          path: dist/android/*
 
   # The CLI (crates/cli, the binary ppvpn) as tar.gz archives, built by
   # tools/cli/build-release.sh: Linux x86_64 and aarch64, static (musl), and
@@ -1504,8 +1585,14 @@ jobs:
   # signatures, the tag, and that the channel does not go back.
   release-files:
     name: release-files
-    if: inputs.channel == 'stable' && needs.prepare.outputs.publish == 'true'
-    needs: [prepare, approve, linux, linux-smoke, linux-repo, windows, macos, cli-linux, cli-macos]
+    if: >-
+      !cancelled() && inputs.channel == 'stable' && needs.prepare.outputs.publish == 'true' &&
+      needs.prepare.result == 'success' && needs.approve.result == 'success' &&
+      needs.linux.result == 'success' && needs.linux-smoke.result == 'success' && needs.linux-repo.result == 'success' &&
+      needs.windows.result == 'success' && needs.macos.result == 'success' &&
+      needs.cli-linux.result == 'success' && needs.cli-macos.result == 'success' &&
+      (needs.android-apk.result == 'success' || needs.android-apk.result == 'skipped')
+    needs: [prepare, approve, linux, linux-smoke, linux-repo, windows, macos, cli-linux, cli-macos, android-apk]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # For the package repositories' signing key, which signs the rpms here.
@@ -1531,7 +1618,14 @@ jobs:
         with:
           pattern: cli-*
           path: artifacts
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: needs.android-apk.result == 'success'
+        with:
+          name: android-apk
+          path: artifacts/android-apk
       - name: Collect
+        # All downloaded artifacts are final release files, including an
+        # APK only when the explicitly enabled signed build succeeded.
         run: |
           set -eu
           mkdir release
@@ -1750,7 +1844,7 @@ jobs:
           newest=$(head -n 1 tags)
           mkdir newest
           gh release download "$newest" --repo "$GITHUB_REPOSITORY" --dir newest \
-            --pattern 'release-meta-*.json' --pattern '*.dmg' --pattern '*-setup.exe'
+            --pattern 'release-meta-*.json' --pattern '*.dmg' --pattern '*-setup.exe' --pattern '*-android.apk'
           echo "NEWEST=$newest" >> "$GITHUB_ENV"
       # A rehearsal's files come from the calling run, laid out as the one
       # release there is.
@@ -1774,6 +1868,9 @@ jobs:
           mkdir -p "linux-releases/$TAG" newest "sums/$TAG"
           cp rehearsal-release/release-meta-linux-x64-*.json rehearsal-release/*.deb rehearsal-release/*.rpm "linux-releases/$TAG/"
           cp rehearsal-release/release-meta-*.json rehearsal-release/*.dmg rehearsal-release/*-setup.exe newest/
+          for apk in rehearsal-release/*-android.apk; do
+            [ ! -f "$apk" ] || cp "$apk" newest/
+          done
           cp rehearsal-release/SHA256SUMS "sums/$TAG/SHA256SUMS"
           echo "NEWEST=$TAG" >> "$GITHUB_ENV"
       # The site redistributes only what the release workflow produced: every

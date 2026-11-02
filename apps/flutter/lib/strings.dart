@@ -264,6 +264,10 @@ const _zh = <String, String>{
   'settingsMenuWin': '设置',
   'preferences': '首选项',
   'checkUpdates': '检查更新…',
+  'apkInstall': '下载并安装',
+  'apkDownloading': '正在下载…',
+  'apkPermission': '请在系统设置中允许此来源安装应用，然后返回并再次点击“下载并安装”。',
+  'apkInstallFailed': '更新未完成，请重试。',
   'openForDetails': '打开 PPVPN 查看详情', // not in the handoff
   // Not in the handoff (#401 step 5): the Linux update notice, from the
   // former native apps' strings.
@@ -523,6 +527,10 @@ const _en = <String, String>{
   'settingsMenuWin': 'Settings',
   'preferences': 'Preferences',
   'checkUpdates': 'Check for Updates…',
+  'apkInstall': 'Download and Install',
+  'apkDownloading': 'Downloading…',
+  'apkPermission': 'Allow installs from this source in Settings, then return and tap Download and Install again.',
+  'apkInstallFailed': 'The update did not complete. Please try again.',
   'openForDetails': 'Open PPVPN for Details', // not in the handoff
   // Not in the handoff (#401 step 5), as above.
   'updAvailT': 'PPVPN {v} is available',

@@ -59,12 +59,12 @@ tier() {   # path relative to the site
     linux/apt/pool/*|linux/apt/dists/*/by-hash/*|linux/setup/*) echo 1 ;;
     linux/rpm/*/repodata/repomd.xml|linux/rpm/*/repodata/repomd.xml.asc) echo 4 ;;
     linux/rpm/*/repodata/*) echo 1 ;;
-    desktop/*/[0-9]*.[0-9]*.[0-9]*/[0-9]*/*) echo 1 ;;
+    desktop/*/[0-9]*.[0-9]*.[0-9]*/[0-9]*/*|android/*/[0-9]*.[0-9]*.[0-9]*/[0-9]*/*) echo 1 ;;
     linux/ppvpn.asc|linux/ppvpn-archive-keyring.deb|linux/ppvpn-archive-keyring.deb.asc|\
     linux/ppvpn-release.rpm|linux/ppvpn-release.rpm.asc) echo 2 ;;
     linux/apt/dists/*/Packages|linux/apt/dists/*/Packages.gz|linux/apt/dists/*/Packages.xz) echo 3 ;;
     linux/apt/dists/*/Release|linux/apt/dists/*/Release.gpg|linux/apt/dists/*/InRelease) echo 4 ;;
-    desktop/channels/*) echo 6 ;;
+    desktop/channels/*|android/*/latest.json) echo 6 ;;
     *) echo 5 ;;
   esac
 }
@@ -74,6 +74,7 @@ content_type() {
     */InRelease|*/Release|*/Packages) echo "text/plain; charset=utf-8" ;;
     *.deb) echo "application/vnd.debian.binary-package" ;;
     *.rpm) echo "application/x-rpm" ;;
+    *.apk) echo "application/vnd.android.package-archive" ;;
     *.asc|*.gpg) echo "application/pgp-signature" ;;
     *.json) echo "application/json" ;;
     *.xml) echo "application/xml" ;;
@@ -115,9 +116,10 @@ sha256() { sha256sum "$1" | cut -d' ' -f1; }
 # --- 1. the immutable files already in the bucket: the same, or refused -------------------
 # One listing of each prefix, rather than a request per file. A listing that fails (no
 # access) stops the run: nothing is uploaded blind.
-for prefix in linux/ desktop/; do
-  s3api list-objects-v2 --bucket "$R2_BUCKET" --prefix "$prefix" --query 'Contents[].Key' --output text \
-    | tr '\t' '\n' | grep -v '^None$' || true
+for prefix in linux/ desktop/ android/; do
+  listing=$(s3api list-objects-v2 --bucket "$R2_BUCKET" --prefix "$prefix" --query 'Contents[].Key' --output text) \
+    || die "cannot list $prefix in bucket $R2_BUCKET"
+  printf '%s\n' "$listing" | tr '\t' '\n' | grep -v '^None$' || true
 done >"$PLAN.objects"
 s3api head-bucket --bucket "$R2_BUCKET" >/dev/null || die "cannot read the bucket $R2_BUCKET"
 declare -A SKIP=()
@@ -137,7 +139,7 @@ while IFS=$'\t' read -r t path; do
 done <"$PLAN"
 
 if [[ "$CHECK_ONLY" == 1 ]]; then
-  echo "bucket $R2_BUCKET: $(wc -l <"$PLAN.objects" | tr -d ' ') objects under linux/ and desktop/"
+  echo "bucket $R2_BUCKET: $(wc -l <"$PLAN.objects" | tr -d ' ') objects under linux/, desktop/ and android/"
   echo "immutable files already there with the same content: ${#SKIP[@]}"
   while IFS=$'\t' read -r t path; do
     [[ "$t" != 1 ]] && grep -qxF "$path" "$PLAN.objects" && echo "would overwrite  $path"

@@ -30,7 +30,7 @@ class UpdateNotice {
   final String version;
 
   /// The upgrade command for this install's package format.
-  final String command;
+  final String? command;
 }
 
 /// How a check the user asked for ended (Linux; WinSparkle and Sparkle show their own).
@@ -50,6 +50,9 @@ class Updates {
 
   /// Linux: the last check the user asked for.
   static final ValueNotifier<CheckResult?> checked = ValueNotifier(null);
+  static final ValueNotifier<bool> busy = ValueNotifier(false);
+  static final ValueNotifier<bool> installPermission = ValueNotifier(false);
+  static bool _apk = false;
 
   static String? _feed;
   static String _build = '';
@@ -57,6 +60,24 @@ class Updates {
 
   /// Starts the platform's updater, once the window exists.
   static Future<void> start() async {
+    if (Platform.isAndroid) {
+      try {
+        final state = await _channel.invokeMapMethod<String, Object?>('state');
+        _apk = state?['available'] == true;
+        installs = _apk;
+        if (_apk)
+          unawaited(() async {
+            await Future<void>.delayed(const Duration(seconds: 15));
+            while (true) {
+              await check();
+              await Future<void>.delayed(const Duration(hours: 24));
+            }
+          }());
+      } on PlatformException catch (error) {
+        debugPrint('updates: $error');
+      }
+      return;
+    }
     if (Platform.isMacOS) {
       try {
         final state = await _channel.invokeMapMethod<String, Object?>('state');
@@ -90,13 +111,44 @@ class Updates {
   /// A check the user asked for: Sparkle's or WinSparkle's own windows, or
   /// (Linux) the repository's latest.json.
   static Future<void> check() async {
-    if (Platform.isMacOS) {
+    if (_apk) {
+      if (busy.value) return;
+      busy.value = true;
+      checked.value = null;
+      try {
+        final next = await _channel.invokeMapMethod<String, Object?>('check');
+        notice.value = next == null
+            ? null
+            : UpdateNotice(version: '${next['version']} (${next['versionCode']})', command: null);
+        checked.value = next == null ? CheckResult.upToDate : CheckResult.available;
+      } on PlatformException catch (error) {
+        debugPrint('APK update check: $error');
+        checked.value = CheckResult.failed;
+      } finally {
+        busy.value = false;
+      }
+    } else if (Platform.isMacOS) {
       await _channel.invokeMethod<void>('check');
     } else if (installs) {
       rust.checkForUpdates();
     } else if (notices) {
       checked.value = null;
       checked.value = await _checkFeed();
+    }
+  }
+
+  static Future<void> installApk() async {
+    if (!_apk || busy.value) return;
+    busy.value = true;
+    checked.value = null;
+    installPermission.value = false;
+    try {
+      installPermission.value = await _channel.invokeMethod<String>('install') == 'permission';
+    } on PlatformException catch (error) {
+      debugPrint('APK install: $error');
+      checked.value = CheckResult.failed;
+    } finally {
+      busy.value = false;
     }
   }
 

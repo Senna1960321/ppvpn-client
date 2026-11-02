@@ -21,6 +21,9 @@
 #   ANDROID_FORMAT       android: apk (the default; arm64 and x86_64, for a
 #                        phone or the emulator) or aab (the App Bundle for
 #                        Google Play: release.yml)
+#   ANDROID_DISTRIBUTION  play | apk (default: play for aab, apk for apk).
+#                        Both keep the same application ID. Only apk contains
+#                        the website updater and install permission.
 #   ANDROID_KEYSTORE_FILE, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS,
 #   ANDROID_KEY_PASSWORD
 #                        android: signed with this upload key (the Play
@@ -183,6 +186,7 @@ case $os in
     replace "$gradle" 'namespace = "[^"]*"' 'namespace = "com.peakpassvpn.ppvpn"'
     replace "$gradle" 'applicationId = "[^"]*"' 'applicationId = "com.peakpassvpn.ppvpn"'
     replace "$gradle" 'minSdk = flutter.minSdkVersion' 'minSdk = 26'
+    python3 scripts/android-distribution.py "$gradle"
     rm -r android/app/src/main/kotlin/com/peakpassvpn/ppvpn_flutter
     manifest=android/app/src/main/AndroidManifest.xml
     replace "$manifest" 'android:label="[^"]*"' 'android:label="PPVPN"'
@@ -312,6 +316,7 @@ grep -q '^mod frb_generated;' rust/src/lib.rs || echo 'mod frb_generated;' >> ru
 # others set PPVPN_SKIP_ANALYZE=1 (#459).
 if [ "${PPVPN_SKIP_ANALYZE:-}" != 1 ]; then
   flutter analyze --no-fatal-infos
+  flutter test checks/
 fi
 
 lib="$root/target/release"
@@ -475,11 +480,17 @@ else
 fi
 if [ "$os" = android ]; then
   # versionCode must be positive.
+  distribution=${ANDROID_DISTRIBUTION:-$([ "${ANDROID_FORMAT:-apk}" = aab ] && echo play || echo apk)}
+  case $distribution in play | apk) ;; *) echo "ANDROID_DISTRIBUTION must be play or apk" >&2; exit 1 ;; esac
+  if [ "${ANDROID_FORMAT:-apk}" = aab ] && [ "$distribution" != play ]; then
+    echo "App Bundles for Play must use ANDROID_DISTRIBUTION=play" >&2; exit 1
+  fi
+  android_args=(--flavor "$distribution" --dart-define="PPVPN_ANDROID_CHANNEL=$distribution")
   case ${ANDROID_FORMAT:-apk} in
     apk) flutter build apk --release --target-platform android-arm64,android-x64 \
-      --build-name "$version" --build-number "$((build > 0 ? build : 1))" ;;
+      "${android_args[@]}" --build-name "$version" --build-number "$((build > 0 ? build : 1))" ;;
     aab) flutter build appbundle --release --target-platform android-arm64,android-x64 \
-      --build-name "$version" --build-number "$((build > 0 ? build : 1))" ;;
+      "${android_args[@]}" --build-name "$version" --build-number "$((build > 0 ? build : 1))" ;;
     *) echo "ANDROID_FORMAT must be apk or aab, got '$ANDROID_FORMAT'" >&2; exit 1 ;;
   esac
 elif [ "$os" = ios ]; then
@@ -501,10 +512,10 @@ case $os in
     # An App Bundle keeps the APK's files under base/ (lib/, and dex/ for
     # the classes).
     if [ "${ANDROID_FORMAT:-apk}" = aab ]; then
-      bundle=build/app/outputs/bundle/release/app-release.aab
+      bundle=build/app/outputs/bundle/${distribution}Release/app-${distribution}-release.aab
       inner=base/ dexes='base/dex/classes*.dex'
     else
-      bundle=build/app/outputs/flutter-apk/app-release.apk
+      bundle=build/app/outputs/flutter-apk/app-${distribution}-release.apk
       inner='' dexes='classes*.dex'
     fi
     test -f "$bundle"
@@ -515,12 +526,9 @@ case $os in
         grep -qF "${inner}lib/$abi/$so" <<<"$listing" || { echo "$bundle lacks ${inner}lib/$abi/$so" >&2; exit 1; }
       done
     done
-    # Signed with the upload key when one was given, not the debug key
-    # (Play refuses a debug-signed upload).
+    # AABs use JAR signatures; APKs on minSdk26 can be v2/v3-only.
     if [ -n "${ANDROID_KEYSTORE_FILE:-}" ]; then
-      signer=$(keytool -printcert -jarfile "$bundle")
-      grep -q 'Owner:' <<<"$signer" || { echo "$bundle is not signed" >&2; exit 1; }
-      ! grep -q 'CN=Android Debug' <<<"$signer" || { echo "$bundle is signed with the debug key" >&2; exit 1; }
+      bash "$app/scripts/check-android-signature.sh" "$bundle" "${ANDROID_FORMAT:-apk}"
     fi
     # What native code calls back by name, kept through R8
     # (runner/android/app/proguard-rules.pro).
