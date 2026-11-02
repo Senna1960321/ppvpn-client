@@ -219,7 +219,8 @@ and `packaging/macos/PPVPN.entitlements`. It signs with the fixed certificate th
 pins when `PPVPN_CODESIGN_IDENTITY` is set, ad-hoc otherwise. It then writes
 `PPVPN-<version>-<platform>.dmg` (with the Sparkle signature when
 `SPARKLE_PRIVATE_KEY_FILE` is set), the `.pkg` (id
-`com.peakpassvpn.ppvpn.desktop.pkg`, with the native postinstall) and
+`com.peakpassvpn.ppvpn.desktop.pkg`, with the native postinstall, and the
+same signature for the service's silent updates, #548) and
 `release-meta-<platform>.json`.
 
 An installed app keeps the agent registered as the native app does
