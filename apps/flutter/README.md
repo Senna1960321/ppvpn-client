@@ -260,14 +260,23 @@ What the installer expects of the app, as of the native one:
 
 - the quit event `Local\PPVPN.Desktop.Quit`: the running instance creates
   it (`rust/src/instance.rs`); set, the app quits as the tray's Quit does.
-  The installer and uninstaller set it before replacing or removing the
-  files;
+  The ordinary installer and uninstaller set it before replacing or
+  removing the files; service updates use the separate mode below;
 - `ppvpn.exe --set-shortcut-aumid <.lnk>` stamps the AppUserModelID
   `PeakPass.PPVPN` on the shortcut the installer created and exits
   (`rust/src/aumid.rs`). At every start the app also sets it as the
   process's AppUserModelID and writes its notification registration
   (display name, icon, `ppvpn.exe --toast-activated` as the click
   activator), as the push agent does; the uninstaller removes it.
+
+The privileged service invokes the installer with `/S /SERVICEUPDATE`
+after the initiating app exits (#548). This mode refuses to proceed while
+`tasklist` reports any `ppvpn.exe`, including another user's session, or
+when enumeration fails. It leaves those apps running and exits before
+stopping the service or push agent. It also suppresses the installer's app
+and push-agent relaunch; the service's independent update process handles
+reopening the app in its original user's session. The request and result
+contract is in [host integration, section 16](../../docs/host-integration.md#16-桌面特权服务静默更新548).
 
 In CI (`ci.yml`, job `flutter` on Windows) the installer is built
 unsigned, then `scripts/smoke-installer.ps1` installs it over the native
