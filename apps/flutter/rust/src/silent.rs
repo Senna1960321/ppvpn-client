@@ -111,7 +111,7 @@ enum Loaded {
     Missing,
     /// There, but not readable as the state.
     Unreadable,
-    Read(Saved),
+    Read(Box<Saved>),
 }
 
 fn path() -> Result<PathBuf, String> {
@@ -127,7 +127,7 @@ fn read() -> Loaded {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Loaded::Missing,
         Err(_) => Loaded::Unreadable,
         Ok(bytes) => match serde_json::from_slice(&bytes) {
-            Ok(saved) => Loaded::Read(saved),
+            Ok(saved) => Loaded::Read(Box::new(saved)),
             Err(_) => Loaded::Unreadable,
         },
     }
@@ -135,7 +135,7 @@ fn read() -> Loaded {
 
 fn load() -> Saved {
     match read() {
-        Loaded::Read(saved) => saved,
+        Loaded::Read(saved) => *saved,
         Loaded::Missing => Saved::default(),
         Loaded::Unreadable => {
             tracing::warn!("silent update: state unreadable");
