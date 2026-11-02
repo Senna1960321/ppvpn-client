@@ -31,6 +31,7 @@ import 'strings.dart';
 import 'src/rust/frb_generated.dart';
 import 'theme.dart';
 import 'tray.dart';
+import 'update_notices.dart';
 import 'updates.dart';
 
 /// The native side's answers on Android and iOS (runner/android
@@ -75,7 +76,9 @@ Future<void> main() async {
     if (!rust.claimInstance()) exit(0);
     // Before the client: it reads the API override when it starts.
     Settings.load();
-    background = rust.startedInBackground();
+    // In the tray also when the service opened the app again after an
+    // idle silent update (#548).
+    background = rust.startedInBackground() || (!mobile && rust.startHidden());
     rust.refreshLaunchAtLogin();
     app = AppState(rust.start());
     mark('client_created');
@@ -114,8 +117,48 @@ Future<void> main() async {
   );
   await windowManager.setPreventClose(true);
 
-  Future<void> quit() async {
+  // An update is being installed (#548): the app says so, connects
+  // nothing and quits.
+  if (samplePage == null && await Updates.installingNow()) {
+    void done() {
+      app.stop();
+      exit(0);
+    }
+
+    runApp(PrototypeApp(app: app, installing: done));
+    // Its close button quits too, as does the Windows installer's quit.
+    windowManager.addListener(_QuitOnClose(done));
+    listenForActivations(onShow: () {}, onPush: (_) {}, onQuit: done, onUserQuit: done, onUpdate: () {});
+    await windowManager.show();
+    await windowManager.focus();
+    return;
+  }
+  if (samplePage == null) {
+    // The service opened the app again after the user had quit it: in the
+    // tray (startHidden), and quits now. After installingNow, so that a
+    // launch during the install still says so; the marks stay for the
+    // service's own launch afterwards.
+    if (rust.quitAfterRelaunch()) {
+      app.stop();
+      exit(0);
+    }
+    // Not installing: the mark for the tray has done its part.
+    rust.clearStartHidden();
+  }
+
+  Tray? tray;
+  // With [update], a silent update that is ready goes to the service once
+  // the window and the tray are gone and the cores stopped (#548); not
+  // when an installer asks the app to quit.
+  Future<void> quit({bool update = true}) async {
+    // Out of sight at once: what follows may take a minute.
+    tray?.dispose();
+    await windowManager.hide();
+    // An idle install the service accepted meanwhile stands: nothing to send.
+    final accepted = await Updates.quitting();
+    final install = update && !accepted && Updates.readyAtQuit;
     app.stop();
+    if (install) await Updates.installAtQuit();
     await windowManager.setPreventClose(false);
     await windowManager.destroy();
   }
@@ -126,29 +169,43 @@ Future<void> main() async {
   }
 
   // Before the tray, whose menu offers a check where the app installs updates.
-  if (samplePage == null) await Updates.start();
-  final tray = Tray(
+  if (samplePage == null) {
+    await Updates.start(
+      // Nothing connected and no window: only the tray. A minimised
+      // window counts as open.
+      idle: () async =>
+          _notConnected(app.snapshot.value) && !await windowManager.isVisible() && !await windowManager.isMinimized(),
+      quit: () => quit(update: false),
+    );
+  }
+  final shown = Tray(
     app: app,
     onOpen: () => unawaited(open()),
     onQuit: quit,
     onCheckForUpdates: Updates.installs ? () => unawaited(Updates.check()) : null,
   );
+  tray = shown;
   windowManager.addListener(_HideOnClose());
   mark('tray_created');
   // Off unless PPVPN_FLUTTER_E2E is set (e2e/linux_enhanced.sh).
   if (samplePage == null) startE2e(app, quit);
-  runApp(PrototypeApp(app: app, tray: tray));
+  runApp(PrototypeApp(app: app, tray: shown));
   if (samplePage == null) {
     listenForActivations(
-      onShow: () => unawaited(open()),
+      // Not while the service may be opening the app again (#548).
+      onShow: () {
+        if (!Updates.ignoreShows) unawaited(open());
+      },
       onPush: (pushId) => unawaited(() async {
         if (await app.openPush(pushId)) await open();
       }()),
       // The installer is about to replace the app's files.
-      onQuit: () => unawaited(quit()),
+      onQuit: () => unawaited(quit(update: false)),
+      // The application menu's Quit (macOS).
+      onUserQuit: () => unawaited(quit()),
       // The update's installer runs: out of sight until it asks the app to quit.
       onUpdate: () => unawaited(() async {
-        tray.dispose();
+        shown.dispose();
         await windowManager.hide();
       }()),
     );
@@ -161,13 +218,36 @@ class _HideOnClose with WindowListener {
   void onWindowClose() => unawaited(windowManager.hide());
 }
 
+class _QuitOnClose with WindowListener {
+  _QuitOnClose(this.quit);
+
+  final void Function() quit;
+
+  @override
+  void onWindowClose() => quit();
+}
+
+/// Nothing connected: an idle silent update may go ahead. An error or a
+/// contended path counts only in enhanced mode, where the service refuses
+/// while its core runs; in compatible mode the standard core may still
+/// serve the system proxy or its port after an error.
+bool _notConnected(rust.UiSnapshot snapshot) => switch (snapshot.phase) {
+  rust.UiPhase.off => true,
+  rust.UiPhase.error || rust.UiPhase.contended => snapshot.connectionMode == rust.UiConnectionMode.enhanced,
+  _ => false,
+};
+
 class PrototypeApp extends StatefulWidget {
-  const PrototypeApp({super.key, required this.app, this.tray});
+  const PrototypeApp({super.key, required this.app, this.tray, this.installing});
 
   final AppState app;
 
   /// Held for the app's life; none on Android and iOS.
   final Tray? tray;
+
+  /// The service is installing an update: InstallingNotice in place of the
+  /// pages, quitting with this.
+  final VoidCallback? installing;
 
   @override
   State<PrototypeApp> createState() => _PrototypeAppState();
@@ -227,7 +307,9 @@ class _PrototypeAppState extends State<PrototypeApp> {
               child: ColoredBox(
                 color: t.bg,
                 child: LayoutBuilder(
-                  builder: (context, box) => mobile
+                  builder: (context, box) => widget.installing != null
+                      ? InstallingNotice(onDone: widget.installing!)
+                      : mobile
                       ? Center(
                           child: ConstrainedBox(
                             constraints: const BoxConstraints(maxWidth: Tokens.phoneMaxWidth),

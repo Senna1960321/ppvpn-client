@@ -16,6 +16,7 @@ import '../app_state.dart';
 import '../src/rust/api.dart' as rust;
 import '../strings.dart';
 import '../theme.dart';
+import '../update_notices.dart';
 import '../widgets.dart';
 
 /// Busy phases: the switch shows its in-between state.
@@ -131,6 +132,8 @@ class OverviewPage extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
+              // After a silent update (#548).
+              const UpdatedNotice(),
               Reveal(
                 child: snapshot.profile == rust.UiProfile.invalid
                     ? Column(
