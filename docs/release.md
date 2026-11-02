@@ -40,6 +40,9 @@
     Release 重建并上传更新站点。
   - 构建号是 `DESKTOP_BUILD_OFFSET` 加 `release.yml` 的 run number，只增不减。
 
+`tools/cli/build-release.sh macos` 默认仍一次构建并打包。流水线用 `PPVPN_CLI_STAGE=build` 只编译 slice，
+审批后用 `PPVPN_CLI_STAGE=package` 消费同一次运行的 slice；后一步不编译，仍核对版本、架构、签名和公证。
+
 ## 后端地址
 
 客户端连接的后端由构建时的 `PPVPN_API_BASE_DEFAULT` 决定，代码和 workflow 里都不写域名（#517）。它的值是一个 https 源（例如 `https://www.example.com`，不带路径）：
@@ -81,9 +84,6 @@ stable 的服务在审批前编译，所以 **仓库变量**也必须设置 `PPV
 `PPVPN_WINDOWS_NEXT_PUBLISHER_EKU`。它们是公开的证书身份，不是密钥；Azure 登录配置仍只放在发布环境里。
 环境里若保留同名 EKU 变量，必须与仓库值一致。服务产物记录编译时的两个钉和是否接受未签名客户端，
 打包阶段逐项核对，再核对程序签名；值不一致直接停止，不重编服务或降低校验要求。
-
-`tools/cli/build-release.sh macos` 默认仍一次构建并打包。流水线用 `PPVPN_CLI_STAGE=build` 只编译 slice，
-审批后用 `PPVPN_CLI_STAGE=package` 消费同一次运行的 slice；后一步不编译，仍核对版本、架构、签名和公证。
 
 ## 更新站点（R2）
 

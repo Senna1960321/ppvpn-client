@@ -48,9 +48,11 @@ Profile 可能由宿主暂存以完成进程间交接，但这属于宿主责任
   `PPVPN_WINDOWS_PUBLISHER_EKU`（换一次身份验证时另加 `PPVPN_WINDOWS_NEXT_PUBLISHER_EKU`）给出；
   钉编进服务，安装包升级时替换服务程序即生效。打包时 `check-publisher.ps1` 按同样的规则核对签好的
   `ppvpn.exe`，不符即失败，不会发出拒绝自己客户端的服务。
-  没有钉时：发布构建（即使已签名）把 `PPVPN_WINDOWS_ALLOW_UNSIGNED_CLIENT` 设为 1，只认安装目录里的
-  `ppvpn.exe`（Program Files 只有管理员能写）加会话握手；第一次签名的构建就是这样，从它的日志读出
-  EKU 后设上钉。debug 构建签了名但没有钉时只要求 `WinVerifyTrust` 通过（记一条 warn）。
+  没有钉时，dev 构建（即使已签名）把 `PPVPN_WINDOWS_ALLOW_UNSIGNED_CLIENT` 设为 1，只认安装目录里的
+  `ppvpn.exe`（Program Files 只有管理员能写）加会话握手；第一次签名的 dev 构建就是这样，从它的日志读出
+  EKU 后设上钉。stable 服务在审批前以 `PPVPN_WINDOWS_ALLOW_UNSIGNED_CLIENT=0` 编译，仓库变量
+  `PPVPN_WINDOWS_PUBLISHER_EKU` 必须有效，缺失时构建失败（见[构建与发布](release.md#windows-签名azure-artifact-signing)）。
+  debug 构建签了名但没有钉时只要求 `WinVerifyTrust` 通过（记一条 warn）。
 - macOS 的应用包属于用户（拖进「应用程序」的安装如此，.pkg 安装也由 postinstall 交给用户，见下），用户身份的代码
   能改动包里的文件。所以以 root 运行的东西都先核对签名：
   - 应用请求管理员授权时，root 的 shell 先把 `ppvpn-service-install`/`ppvpn-service-uninstall`（安装时连同

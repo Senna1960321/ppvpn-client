@@ -230,10 +230,11 @@ kickstart` and a rate-limited re-registration.
 
 CI (job `flutter`, macOS) packages the arm64 slice ad-hoc with the client
 and the helpers in debug. It checks the bundle, the signatures, the DMG,
-the expanded `.pkg` and release-meta. release.yml's `macos` job builds the
-app universal (`MACOS_ARCHS="arm64 x86_64"`) and packages both
-architectures through `tools/desktop/ci/build-macos-native.sh`
-(`PPVPN_FLUTTER_BUNDLE`), with the release's signing and Sparkle keys.
+the expanded `.pkg` and release-meta. In release.yml, `macos-app` and
+`macos-service` compile before stable approval; `macos` then packages each
+architecture through `tools/desktop/ci/build-macos-native.sh`
+(`PPVPN_FLUTTER_BUNDLE`), with the release's signing and Sparkle keys after
+approval. A merge builds arm64; manually triggered runs build both architectures.
 
 ## Windows installer
 
@@ -254,6 +255,12 @@ update feed's EdDSA signature take the native build's environment
 (`WINDOWS_SIGN_COMMAND`, `PPVPN_WINDOWS_PUBLISHER_EKU`, `SPARKLE_PRIVATE_KEY`);
 the version is `PPVPN_VERSION` and `PPVPN_BUILD_NUMBER`, as for
 `ci-build.sh`, and the bundle's `ppvpn.exe` must carry it.
+
+For stable releases, `windows-service` builds with `-ServiceOnly` before
+approval; `windows` passes the artifact back with `-ServiceDir` for packaging
+after approval. The recorded publisher EKU pins and unsigned-client mode must
+match the packaging environment. Stable builds require the public repository
+publisher pin described in [Build and release](../../docs/release.md#windows-签名azure-artifact-signing).
 
 What the installer expects of the app, as of the native one:
 
