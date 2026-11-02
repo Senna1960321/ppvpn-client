@@ -859,6 +859,16 @@ async fn probe_one(
 /// delivered; nodes still pending at the deadline report
 /// [`ErrorCode::Timeout`]. Fails only when the node list for an empty request
 /// cannot be read.
+/// Gap between the starts of a latency test's first nodes (#549): 16 nodes
+/// at once sent every first handshake in one burst, which a slow uplink
+/// queued and every sample then counted. Later nodes start as slots free.
+fn start_gap(method: ProbeMethod) -> Duration {
+    match method {
+        ProbeMethod::Icmp | ProbeMethod::Tcp => Duration::from_millis(20),
+        ProbeMethod::Connect => Duration::ZERO,
+    }
+}
+
 pub(crate) async fn run_probe(
     core: Arc<dyn CoreTransport>,
     method: ProbeMethod,
@@ -886,12 +896,14 @@ pub(crate) async fn run_probe(
     let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<ProbeResult>();
     let semaphore = Arc::new(tokio::sync::Semaphore::new(options.node_concurrency.max(1)));
     let mut tasks = tokio::task::JoinSet::new();
-    for node_id in &node_ids {
+    for (index, node_id) in node_ids.iter().enumerate() {
         let node_id = node_id.clone();
         let core = core.clone();
         let sender = sender.clone();
         let semaphore = semaphore.clone();
+        let wait = start_gap(method) * index.min(options.node_concurrency) as u32;
         tasks.spawn(async move {
+            tokio::time::sleep(wait).await;
             let Ok(_permit) = semaphore.acquire_owned().await else {
                 return;
             };

@@ -24,8 +24,15 @@ DOWNLOAD = "https://github.com/peakpassvpn/ppvpn-client/releases/download"
 SITE = "https://updates.example.com"
 
 
-def release(directory, channel="stable", version="0.4.0", build="1234", skip=(), with_files=True, **overrides):
-    """Writes a release's metadata (and installers) into `directory`."""
+def package_name(platform):
+    return FILES[platform].replace(".dmg", ".pkg")
+
+
+def release(directory, channel="stable", version="0.4.0", build="1234", skip=(), with_files=True,
+            packages=None, **overrides):
+    """Writes a release's metadata (and installers) into `directory`. packages:
+    the macOS metas also describe their pkgs, "signed" with an EdDSA signature
+    as from #548 on, "unsigned" as before."""
     for platform, name in FILES.items():
         if platform in skip:
             continue
@@ -43,6 +50,14 @@ def release(directory, channel="stable", version="0.4.0", build="1234", skip=(),
             meta["ed_signature"] = "c2lnbmF0dXJl"
         if platform == "windows-x64":
             meta["installer_arguments"] = "/S"
+        if packages and platform in site.SILENT:
+            package = f"package of {platform}".encode()
+            if with_files:
+                with open(os.path.join(directory, package_name(platform)), "wb") as f:
+                    f.write(package)
+            meta.update(install_file=package_name(platform), install_length=len(package),
+                        install_sha256=hashlib.sha256(package).hexdigest(),
+                        install_ed_signature="cGtnIHNpZ25hdHVyZQ==" if packages == "signed" else None)
         meta.update(overrides.get(platform, {}))
         with open(os.path.join(directory, f"release-meta-{platform}.json"), "w", encoding="utf-8") as f:
             json.dump(meta, f)
@@ -147,6 +162,69 @@ class Build(unittest.TestCase):
         self.assertEqual(pointer["sha256sums_url"], f"{DOWNLOAD}/v0.4.0/SHA256SUMS")
         site.check_pointer(pointer, "stable")
 
+    def test_signed_packages_go_in_the_pointer_and_the_site(self):
+        release(self.assets.name, packages="signed")
+        written = site.build(self.assets.name, "v0.4.0", "stable", DOWNLOAD, SITE, self.out.name,
+                             installers_on_site=True)
+        pointer = self.pointer()
+        for platform in site.SILENT:
+            relative = f"desktop/stable/0.4.0/1234/{package_name(platform)}"
+            self.assertIn(relative, written)
+            with open(os.path.join(self.out.name, relative), "rb") as f:
+                body = f.read()
+            entry = pointer["platforms"][platform]
+            self.assertEqual({key: value for key, value in entry.items() if key.startswith("install_")}, {
+                "install_file": package_name(platform),
+                "install_url": f"{SITE}/{relative}",
+                "install_length": len(body),
+                "install_sha256": hashlib.sha256(body).hexdigest(),
+                "install_ed_signature": "cGtnIHNpZ25hdHVyZQ==",
+            })
+            # The feed still updates from the DMG.
+            root = ET.parse(os.path.join(self.out.name, "desktop", "stable", f"appcast-{platform}.xml")).getroot()
+            self.assertTrue(root.find("channel/item/enclosure").get("url").endswith(FILES[platform]))
+        self.assertFalse([key for key in pointer["platforms"]["windows-x64"] if key.startswith("install_")])
+        site.check_pointer(pointer, "stable")
+
+    def test_packages_without_a_signature_stay_out(self):
+        # Releases before #548: the pkg is in the metadata but not signed for the service.
+        release(self.assets.name, packages="unsigned")
+        written = site.build(self.assets.name, "v0.4.0", "stable", DOWNLOAD, SITE, self.out.name,
+                             installers_on_site=True)
+        self.assertFalse([path for path in written if path.endswith(".pkg")])
+        for entry in self.pointer()["platforms"].values():
+            self.assertFalse([key for key in entry if key.startswith("install_")])
+
+    def test_signed_packages_without_the_site_point_at_the_release(self):
+        release(self.assets.name, packages="signed", with_files=False)
+        self.build()
+        entry = self.pointer()["platforms"]["macos-x64"]
+        self.assertEqual(entry["install_url"], f"{DOWNLOAD}/v0.4.0/{package_name('macos-x64')}")
+
+    def test_installers_on_site_need_the_signed_packages(self):
+        release(self.assets.name, packages="signed")
+        os.remove(os.path.join(self.assets.name, package_name("macos-arm64")))
+        with self.assertRaisesRegex(site.Refused, "macos-arm64: .*\\.pkg is missing"):
+            site.build(self.assets.name, "v0.4.0", "stable", DOWNLOAD, SITE, self.out.name, installers_on_site=True)
+        self.assertEqual(self.written(), [])
+
+    def test_package_refusals(self):
+        cases = {
+            "wrong package hash": {"macos-x64": {"install_sha256": "0" * 64}},
+            "wrong package length": {"macos-arm64": {"install_length": 1}},
+            "not a pkg": {"macos-arm64": {"install_file": FILES["macos-arm64"]}},
+            "path in install_file": {"macos-arm64": {"install_file": "../x.pkg"}},
+            "length as text": {"macos-x64": {"install_length": "17"}},
+            "no package hash": {"macos-x64": {"install_sha256": None}},
+            "signature on windows": {"windows-x64": {"install_ed_signature": "c2ln"}},
+        }
+        for name, overrides in cases.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as assets, tempfile.TemporaryDirectory() as out:
+                release(assets, packages="signed", **overrides)
+                with self.assertRaises(site.Refused):
+                    site.build(assets, "v0.4.0", "stable", DOWNLOAD, SITE, out)
+                self.assertEqual(os.listdir(out), [])
+
     def test_installers_on_site_need_the_installers(self):
         release(self.assets.name)
         os.remove(os.path.join(self.assets.name, FILES["windows-x64"]))
@@ -249,13 +327,21 @@ class Downgrade(unittest.TestCase):
 class Check(unittest.TestCase):
     def pointer(self):
         with tempfile.TemporaryDirectory() as assets, tempfile.TemporaryDirectory() as out:
-            release(assets)
+            release(assets, packages="signed")
             site.build(assets, "v0.4.0", "stable", DOWNLOAD, SITE, out)
             with open(os.path.join(out, "desktop", "channels", "stable.json"), encoding="utf-8") as f:
                 return json.load(f)
 
     def test_accepts_what_build_writes(self):
         site.check_pointer(self.pointer(), "stable")
+
+    def test_accepts_a_pointer_without_install_fields(self):
+        # The published pointer of a release before #548, read as --current.
+        pointer = self.pointer()
+        for platform in site.SILENT:
+            for key in site.INSTALL_KEYS:
+                del pointer["platforms"][platform][key]
+        site.check_pointer(pointer, "stable")
 
     def test_refuses(self):
         def broken(change):
@@ -277,6 +363,15 @@ class Check(unittest.TestCase):
             "zero length": lambda p: p["platforms"]["windows-x64"].update(length=0),
             "short hash": lambda p: p["platforms"]["windows-x64"].update(sha256="abc"),
             "no signature": lambda p: p["platforms"]["windows-x64"].update(ed_signature=""),
+            "partial install fields": lambda p: p["platforms"]["macos-x64"].pop("install_sha256"),
+            "install fields on windows": lambda p: p["platforms"]["windows-x64"].update(
+                {key: value for key, value in p["platforms"]["macos-x64"].items() if key.startswith("install_")}),
+            "install_url of another file": lambda p: p["platforms"]["macos-arm64"].update(install_url=DOWNLOAD + "/v0.4.0/other.pkg"),
+            "http install_url": lambda p: p["platforms"]["macos-arm64"].update(
+                install_url="http://example.com/" + p["platforms"]["macos-arm64"]["install_file"]),
+            "zero install_length": lambda p: p["platforms"]["macos-arm64"].update(install_length=0),
+            "short install_sha256": lambda p: p["platforms"]["macos-arm64"].update(install_sha256="abc"),
+            "empty install_ed_signature": lambda p: p["platforms"]["macos-arm64"].update(install_ed_signature=""),
         }
         for name, change in cases.items():
             with self.subTest(name), self.assertRaises(site.Refused):

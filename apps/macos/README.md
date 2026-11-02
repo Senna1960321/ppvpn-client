@@ -45,12 +45,15 @@ re-signs inside out, checks each binary's architecture, that the agent links
 the single framework in `Contents/Frameworks`, and the signature. It writes
 the DMG, the package and `release-meta-macos-<arm64|x64>.json` (schema 1:
 platform, channel, version, build, file, length, sha256, ed_signature, min_os,
-published_at, all of the DMG, plus install_file, install_length and
-install_sha256 of the package), from which the update site's feed is written.
+published_at, all of the DMG, plus install_file, install_length,
+install_sha256 and install_ed_signature of the package), from which the
+update site's feed is written.
 The package (`pkgbuild`) installs only to /Applications, is not relocatable,
 and runs `packaging/postinstall`, which hands the bundle to the console user
 so that Sparkle updates it without an administrator prompt
-(docs/security.md). `SPARKLE_PRIVATE_KEY_FILE` fills `ed_signature`. For stable
+(docs/security.md). `SPARKLE_PRIVATE_KEY_FILE` fills `ed_signature` and
+`install_ed_signature`: the privileged service checks the package with the
+same key before it installs it silently (#548). For stable
 releases, `release.yml` compiles the app and service before approval. Its `macos`
 job then calls `tools/desktop/ci/build-macos-native.sh` with those artifacts to
 sign and package each architecture after approval.

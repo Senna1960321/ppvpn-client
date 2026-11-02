@@ -20,7 +20,8 @@
 #   PPVPN_APP_ENTITLEMENTS     sign the app itself with this file (default: keep
 #                              the entitlements Xcode signed it with)
 #   PPVPN_RELEASE_CHANNEL      dev | stable, recorded in release-meta (unset: null)
-#   SPARKLE_PRIVATE_KEY_FILE   when set, sign the DMG for Sparkle (sign_update)
+#   SPARKLE_PRIVATE_KEY_FILE   when set, sign the DMG for Sparkle and the pkg for
+#                              the service's silent updates (sign_update, #548)
 #   PPVPN_SOURCE_PACKAGES      the Xcode build's SourcePackages, where Sparkle's
 #                              sign_update is (needed with SPARKLE_PRIVATE_KEY_FILE)
 #
@@ -31,10 +32,12 @@
 # Output (dist/macos), <platform> = macos-arm64 | macos-x64:
 #   PPVPN-<version>-<platform>.dmg   Sparkle's updates and manual installs
 #   PPVPN-<version>-<platform>.pkg   first installs: Installer puts the app in
-#                                    /Applications (packaging/postinstall)
+#                                    /Applications (packaging/postinstall); also
+#                                    what the service installs silently (#548)
 #   release-meta-<platform>.json   what the update site's feed and pointer are written from;
 #                                  file/length/sha256/ed_signature are the DMG's,
-#                                  install_file/install_length/install_sha256 the pkg's
+#                                  install_file/install_length/install_sha256/
+#                                  install_ed_signature the pkg's
 set -Eeuo pipefail
 # Name the failing command: some (a pipeline in an assignment) fail silently.
 trap 'echo "error: ${BASH_SOURCE[0]}:$LINENO: \"$BASH_COMMAND\" exited $?" >&2' ERR
@@ -345,19 +348,27 @@ if [[ "$NOTARIZE" == 1 ]]; then
   spctl -a -vv -t install "$PKG"
 fi
 
-ED_SIGNATURE=""
+ED_SIGNATURE="" INSTALL_ED_SIGNATURE=""
 if [[ -n "${SPARKLE_PRIVATE_KEY_FILE:-}" ]]; then
   : "${PPVPN_SOURCE_PACKAGES:?PPVPN_SOURCE_PACKAGES is required with SPARKLE_PRIVATE_KEY_FILE}"
   SIGN_UPDATE="$(find "$PPVPN_SOURCE_PACKAGES/artifacts" -path '*/bin/sign_update' -type f | head -1)"
   [[ -x "$SIGN_UPDATE" ]] || { echo "error: sign_update not found" >&2; exit 1; }
   # Prints: sparkle:edSignature="<base64>" length="<bytes>"
-  ED_SIGNATURE="$("$SIGN_UPDATE" --ed-key-file "$SPARKLE_PRIVATE_KEY_FILE" "$DMG" \
-    | sed -n 's/.*sparkle:edSignature="\([^"]*\)".*/\1/p')"
-  [[ -n "$ED_SIGNATURE" ]] || { echo "error: sign_update produced no signature" >&2; exit 1; }
+  ed_signature() {
+    local signature
+    signature="$("$SIGN_UPDATE" --ed-key-file "$SPARKLE_PRIVATE_KEY_FILE" "$1" \
+      | sed -n 's/.*sparkle:edSignature="\([^"]*\)".*/\1/p')"
+    [[ -n "$signature" ]] || { echo "error: sign_update produced no signature for $1" >&2; exit 1; }
+    printf '%s' "$signature"
+  }
+  ED_SIGNATURE="$(ed_signature "$DMG")"
+  # The service checks the pkg with the same key before it installs it (#548).
+  INSTALL_ED_SIGNATURE="$(ed_signature "$PKG")"
 fi
 
-# Release metadata (schema 1, agreed across platforms); ed_signature is null
-# for unsigned local builds, which must not be published.
+# Release metadata (schema 1, agreed across platforms); ed_signature and
+# install_ed_signature are null for unsigned local builds, which must not be
+# published.
 META="$OUT_DIR/release-meta-$PLATFORM.json"
 python3 - "$META" <<PY
 import json, sys
@@ -374,6 +385,7 @@ json.dump({
     "install_file": "$(basename "$PKG")",
     "install_length": $(stat -f %z "$PKG"),
     "install_sha256": "$(shasum -a 256 "$PKG" | cut -d' ' -f1)",
+    "install_ed_signature": "$INSTALL_ED_SIGNATURE" or None,
     "min_os": "$MIN_OS",
     "published_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
 }, open(sys.argv[1], "w"), indent=2)
