@@ -116,7 +116,7 @@ Linux 上，路由规则被删时由守护补回，补不回来进入 `Fatal{Tun
 
 ## 探测语义
 
-- 入口探测直接测每个入口，不经隧道的规则：`tcp` 方法对 `endpoint.ip:endpoint.port` 做一次 TCP 握手（没有 IP 时先解析 `endpoint.domain`，解析时间不计入），不做协议握手；`icmp` 方法发一个 ICMP echo。结果字段是 `latency_ms`。节点级结果取 primary（`ingresses[0]`），primary 失败时取最快的成功 backup，都失败时报 primary 的失败。每个入口结果带 `endpoint_key`、`replica_ordinal`、`role`。入口探测需要已 apply 的 Profile，不需要已 start。
+- 入口探测直接测每个入口，不经隧道的规则：`tcp` 方法对 `endpoint.ip:endpoint.port` 做 TCP 握手（没有 IP 时先解析 `endpoint.domain`，解析一次，时间不计入），不做协议握手；`icmp` 方法发 ICMP echo。每个入口在超时内连续采样 3 次，结果字段 `latency_ms` 取最快的一次；任一次成功即成功，都失败时报最后一次的失败，超时的那次丢弃（#549）。一次请求里最先的几个入口探测相隔 10 ms 依次开始，不同时发出。节点级结果取 primary（`ingresses[0]`），primary 失败时取最快的成功 backup，都失败时报 primary 的失败。每个入口结果带 `endpoint_key`、`replica_ordinal`、`role`。入口探测需要已 apply 的 Profile，不需要已 start。
 - ICMP 不需要特权：macOS/iOS 与 Linux/Android 用 `SOCK_DGRAM` ICMP socket（Linux 需要 `net.ipv4.ping_group_range` 包含当前组，否则报 `ICMP_UNSUPPORTED`），Windows 用 IP Helper 的 `IcmpSendEcho2`。
 - 多入口节点翻译成一个 selector：默认成员是 Sail 的 fallback 组，primary 优先，按数组顺序拨号失败就换下一个入口（只在同一节点内），健康检查发现 primary 恢复后切回（见 [Backend Profile](backend-profile.md#故障转移语义)）；其余成员是各个入口，pin 就是让 selector 选中其中一个。
 - 可用性探测经指定节点的出站发出一次完整的 GET（跟随重定向），结果字段是 `total_ms`，包含节点连接和目标响应的时间，不能当作入口延迟。它不经本地代理的监听，但实例必须带本地代理（否则 `LOCAL_PROXY_DISABLED`），并且已 start（否则 `CORE_NOT_RUNNING`）。TUN 实例始终返回 `LOCAL_PROXY_DISABLED`。
