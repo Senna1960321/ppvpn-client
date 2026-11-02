@@ -68,6 +68,24 @@ Profile 可能由宿主暂存以完成进程间交接，但这属于宿主责任
   `chown -R <用户>:admin /Applications/PPVPN.app`（绝对路径，不跟随符号链接，没有 `-H`/`-L`）。
   控制台用户是 root、loginwindow 或取不到时什么都不做，退出码总是 0。这样应用包的所有者和拖进去安装时一样，
   Sparkle 能原地更新，不用每次要管理员密码；代价就是上一条所说的用户可写，由签名核对兜住。
+- 桌面静默更新（#548，`crates/service/src/update.rs`，请求和结果见 `docs/host-integration.md` 第 16 节）：
+  服务以 root/SYSTEM 安装应用下载的安装包，所以不信任请求里的文件：
+  - 只按请求里的路径打开一次：`O_NOFOLLOW`（Windows `FILE_FLAG_OPEN_REPARSE_POINT`），在同一个句柄上查普通文件和
+    长度，复制进暂存目录；之后的核验、安装都只用这份副本。
+  - 副本要过三道核验：编进服务的 EdDSA 公钥（Sparkle、WinSparkle 用的同一把）；平台签名（macOS：Gatekeeper
+    认它已公证，签名者是 `macos_team_id` 那个 Team 的 Developer ID Installer；Windows：和认客户端相同的
+    `WinVerifyTrust` 加发布者钉）；版本（构建号大于服务自己的，并且等于包里写的版本）。
+  - 暂存目录只有 root/SYSTEM 能写：macOS `/Library/Application Support/PPVPN/updates`（父目录要 root 所有、
+    别人不可写，本目录 `700`）；Windows `%ProgramData%\PPVPN\updates`。普通用户能在 `%ProgramData%` 下建目录，
+    所以父目录和它本身都要归 SYSTEM 或 Administrators 所有、不是重解析点；本目录新建时就带只含 SYSTEM 和
+    Administrators 的受保护 DACL，已有的就重设成这样。不满足时以 `UPDATE_UNSUPPORTED` 拒绝。每次用之前删掉
+    旧的 `current`、重新建，新建失败就放弃，不用别的进程建的目录。
+  - 安装进程是复制到暂存目录里的服务程序，不在服务的进程组（macOS `setsid`）或控制台里，所以安装停掉服务时
+    它不受影响。macOS 安装 pkg 之后，按上面的规则换上新服务：把新应用包里的 `ppvpn-service-install` 和
+    `ppvpn-service` 复制到暂存目录，核对副本满足标识为 `com.peakpassvpn.ppvpn.service-install` 的要求，
+    再以 root 运行副本。
+  - 重新打开应用用原来那个用户的身份：macOS 用 `launchctl asuser` 加 `sudo -u`，Windows 用该会话的用户令牌，
+    不以 root/SYSTEM 运行应用。
 - 每次启动轮换至少 256 bit 随机会话密钥；Unix 交换文件为 `0600`。
 - Bearer 比较使用恒定时间比较。所有调用都要发送认证，事件流也不例外。
 - 生产宿主应使用 `--exit-on-stdin-close` 的父进程存活管道，并在启动超时、异常退出时回收子进程。

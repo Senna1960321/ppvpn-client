@@ -2909,6 +2909,7 @@ name = "ppvpn-service"
 version = "0.7.4"
 dependencies = [
  "anyhow",
+ "base64",
  "core-foundation 0.10.1",
  "hex",
  "hmac",
@@ -2919,6 +2920,7 @@ dependencies = [
  "parking_lot",
  "ppvpn-core",
  "ppvpn-engine-host",
+ "ring",
  "security-framework",
  "serde",
  "serde_json",

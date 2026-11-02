@@ -363,6 +363,12 @@ impl RunningCore {
 }
 
 impl CoreManager {
+    /// Whether a core runs, for any session (a silent update waits for
+    /// none).
+    pub fn has_core(&self) -> bool {
+        self.state.is_some()
+    }
+
     /// Service status for `client_pid`. Session details (id, generation,
     /// revision, lease) are shown only to the owner's OS user; anyone else
     /// learns only that the connection is in use.
@@ -976,7 +982,7 @@ fn prepare_state_dir(state: &Path) -> Result<()> {
 }
 
 #[cfg(windows)]
-fn harden_permissions(path: &Path) -> Result<()> {
+pub(crate) fn harden_permissions(path: &Path) -> Result<()> {
     use anyhow::Context;
     let status = std::process::Command::new("icacls.exe")
         .arg(path)
