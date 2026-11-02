@@ -18,7 +18,9 @@
 # the pointer names it: install_file, install_length and install_sha256 in the release-meta,
 # install_path (its key) added to the pointer. All of them or none (the backend answers 503
 # to a partial set; none means the DMG), and only on macOS. The DMG stays in file/path: the
-# Sparkle feeds update from it.
+# Sparkle feeds update from it. The pkg's EdDSA signature (install_ed_signature, for the
+# service's silent updates, #548) is for the update site; the pointers leave it out, so the
+# backend sees the same three fields as before.
 #
 #   upload-downloads.sh <release dir>           upload
 #   upload-downloads.sh --plan <release dir>    verify the files and print the keys; no bucket
@@ -102,13 +104,17 @@ for platform in "${PLATFORMS[@]}"; do
     *) [[ -n "$(field .ed_signature)" ]] || die "$platform: ed_signature is missing" ;;
   esac
   FILE[$platform]="$file"
-  # The first-install package: all three fields valid, or none; install_path is the upload's.
+  # The first-install package: all three fields valid, or none, and its EdDSA signature when
+  # the release has one; install_path is the upload's.
   [[ -z "$(field .install_path)" ]] || die "$platform: install_path is set by this upload, not by the release-meta"
   install_keys="$(jq -r '[keys[] | select(startswith("install_"))] | join(" ")' "$meta")"
   if [[ -n "$install_keys" ]]; then
     [[ "$platform" == macos-* ]] || die "$platform: install_* fields are for macOS only ($install_keys)"
-    [[ "$install_keys" == "install_file install_length install_sha256" ]] \
-      || die "$platform: install_* fields must be install_file, install_length and install_sha256 together, not: $install_keys"
+    [[ "$install_keys" == "install_file install_length install_sha256" \
+      || "$install_keys" == "install_ed_signature install_file install_length install_sha256" ]] \
+      || die "$platform: install_* fields must be install_file, install_length and install_sha256 together (and install_ed_signature), not: $install_keys"
+    [[ "$install_keys" != install_ed_signature* || -n "$(field .install_ed_signature)" ]] \
+      || die "$platform: install_ed_signature is empty"
     install="$(field .install_file)"
     [[ "$install" =~ ^[A-Za-z0-9._+~-]+\.pkg$ ]] || die "$platform: unexpected install_file: $install"
     [[ -f "$DIR/$install" ]] || die "$platform: $install is missing"
@@ -132,7 +138,7 @@ done >"$PLAN"
 for platform in "${PLATFORMS[@]}"; do
   if [[ -n "${INSTALL[$platform]:-}" ]]; then
     jq --arg path "$RELEASES/${FILE[$platform]}" --arg install "$RELEASES/${INSTALL[$platform]}" \
-      '. + {path: $path, install_path: $install}' "$DIR/release-meta-$platform.json"
+      '. + {path: $path, install_path: $install} | del(.install_ed_signature)' "$DIR/release-meta-$platform.json"
   else
     jq --arg path "$RELEASES/${FILE[$platform]}" '. + {path: $path}' "$DIR/release-meta-$platform.json"
   fi >"$WORK/release-meta-$platform.json"

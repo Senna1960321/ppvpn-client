@@ -964,7 +964,8 @@ jobs:
           import hashlib, json, os, sys
           meta = json.load(open(sys.argv[1]))
           keys = {"schema", "platform", "channel", "version", "build", "file", "length", "sha256",
-                  "ed_signature", "install_file", "install_length", "install_sha256", "min_os",
+                  "ed_signature", "install_file", "install_length", "install_sha256",
+                  "install_ed_signature", "min_os",
                   "published_at"}
           assert set(meta) == keys, sorted(set(meta) ^ keys)
           assert meta["platform"] == "macos-arm64" and meta["min_os"] == "13.0", meta

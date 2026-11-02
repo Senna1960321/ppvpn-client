@@ -20,7 +20,7 @@
 #                              <site>/desktop/<channel>/appcast-<platform>.xml;
 #                              without either, the build has no update feed
 #   PPVPN_SPARKLE_PUBLIC_KEY   EdDSA public key; empty disables updates
-#   SPARKLE_PRIVATE_KEY        EdDSA private key (base64); signs the DMGs
+#   SPARKLE_PRIVATE_KEY        EdDSA private key (base64); signs the DMGs and pkgs
 #   MACOS_SIGNING_P12_BASE64   the Developer ID Application certificate + key of
 #   MACOS_SIGNING_P12_PASSWORD   our team (crates/service/src/macos_team_id, #471);
 #                              without them builds are ad-hoc

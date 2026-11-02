@@ -44,7 +44,16 @@ The pointer (schema 2):
     release_url, release_notes_url, sha256sums_url,
     platforms: { <platform>: { file, url, length, sha256, min_os,
         and for the Sparkle platforms ed_signature, appcast_url,
-        and on Windows installer_arguments } }
+        on Windows installer_arguments,
+        and on macOS, when the release signed its pkg, install_file,
+        install_url, install_length, install_sha256, install_ed_signature } }
+
+The macOS install_* fields are the .pkg the privileged service installs
+silently (#548, docs/host-integration.md section 16). With
+--installers-on-site the pkg is copied into the site like the DMG. A
+release whose metadata has no install_ed_signature (before #548, or built
+without the update key) has none of them, and the apps keep Sparkle's
+prompt.
 """
 
 import argparse
@@ -62,6 +71,9 @@ PLATFORMS = ("macos-arm64", "macos-x64", "windows-x64", "linux-x64-deb", "linux-
 # Updated through Sparkle (macOS) and WinSparkle: an EdDSA signature and a feed each.
 SPARKLE = ("macos-arm64", "macos-x64", "windows-x64")
 CHANNELS = ("dev", "stable")
+# Installed silently by the privileged service from the pkg (#548).
+SILENT = ("macos-arm64", "macos-x64")
+INSTALL_KEYS = ("install_file", "install_url", "install_length", "install_sha256", "install_ed_signature")
 REPOSITORY = "peakpassvpn/ppvpn-client"
 HOMEPAGE = "https://www.peakpassvpn.com"
 FEED_TITLES = {"macos-arm64": "PPVPN for macOS", "macos-x64": "PPVPN for macOS", "windows-x64": "PPVPN for Windows"}
@@ -105,12 +117,20 @@ def load_release(assets):
             raise Refused(f"{platform}: length is not an integer")
         if os.path.basename(meta["file"]) != meta["file"]:
             raise Refused(f"{platform}: file is not a bare file name")
-        installer = os.path.join(assets, meta["file"])
-        if os.path.isfile(installer):
-            if os.path.getsize(installer) != meta["length"]:
-                raise Refused(f"{platform}: {meta['file']} is not {meta['length']} bytes")
-            if sha256_file(installer) != meta["sha256"]:
-                raise Refused(f"{platform}: {meta['file']} does not have the metadata's SHA-256")
+        check_file(assets, platform, meta["file"], meta["length"], meta["sha256"])
+        if meta.get("install_ed_signature"):
+            if platform not in SILENT:
+                raise Refused(f"{platform}: install_ed_signature is for macOS only")
+            if not isinstance(meta["install_ed_signature"], str):
+                raise Refused(f"{platform}: install_ed_signature is not a string")
+            install = meta.get("install_file")
+            if not isinstance(install, str) or os.path.basename(install) != install or not install.endswith(".pkg"):
+                raise Refused(f"{platform}: install_file is not a bare .pkg file name")
+            if not isinstance(meta.get("install_length"), int) or isinstance(meta.get("install_length"), bool):
+                raise Refused(f"{platform}: install_length is not an integer")
+            if not isinstance(meta.get("install_sha256"), str):
+                raise Refused(f"{platform}: install_sha256 is missing")
+            check_file(assets, platform, install, meta["install_length"], meta["install_sha256"])
         metas[platform] = meta
     for key in ("version", "build", "channel"):
         values = {meta.get(key) for meta in metas.values()}
@@ -155,6 +175,18 @@ def build_pointer(metas, tag, channel, download_base, site_base, installers_on_s
             entry["appcast_url"] = f"{site_base}/desktop/{channel}/appcast-{platform}.xml"
         if meta.get("installer_arguments"):
             entry["installer_arguments"] = meta["installer_arguments"]
+        package = signed_package(meta)
+        if package:
+            install_url = f"{download_base}/{tag}/{package}"
+            if installers_on_site:
+                install_url = f"{site_base}/{installer_path(channel, version, build, package)}"
+            entry.update({
+                "install_file": package,
+                "install_url": install_url,
+                "install_length": meta["install_length"],
+                "install_sha256": meta["install_sha256"],
+                "install_ed_signature": meta["install_ed_signature"],
+            })
         platforms[platform] = entry
     pointer = {
         "schema": 2,
@@ -202,6 +234,16 @@ def check_pointer(pointer, channel):
         if platform in SPARKLE:
             need(isinstance(entry.get("ed_signature"), str) and entry["ed_signature"], f"{platform}: ed_signature is missing (built without the update key)")
             need(isinstance(entry.get("appcast_url"), str) and entry["appcast_url"].startswith("https://"), f"{platform}: appcast_url is not an https URL")
+        install_keys = sorted(key for key in entry if key.startswith("install_"))
+        if not install_keys:
+            continue
+        need(platform in SILENT, f"{platform}: install_* fields are for macOS only")
+        need(install_keys == sorted(INSTALL_KEYS), f"{platform}: install_* fields must be {', '.join(INSTALL_KEYS)} together, not {', '.join(install_keys)}")
+        need(isinstance(entry["install_file"], str) and entry["install_file"].endswith(".pkg"), f"{platform}: install_file is not a .pkg")
+        need(isinstance(entry["install_url"], str) and entry["install_url"].startswith("https://") and entry["install_url"].endswith("/" + entry["install_file"]), f"{platform}: install_url is not an https URL of install_file")
+        need(isinstance(entry["install_length"], int) and not isinstance(entry["install_length"], bool) and entry["install_length"] > 0, f"{platform}: install_length is not a positive integer")
+        need(isinstance(entry["install_sha256"], str) and re.fullmatch(r"[0-9a-f]{64}", entry["install_sha256"]), f"{platform}: install_sha256 is not 64 hex characters")
+        need(isinstance(entry["install_ed_signature"], str) and entry["install_ed_signature"], f"{platform}: install_ed_signature is empty")
 
 
 def appcast(pointer, platform):
@@ -244,6 +286,21 @@ def appcast(pointer, platform):
 """
 
 
+def check_file(assets, platform, name, length, sha256):
+    """An installer that is present must be the one its metadata describes."""
+    path = os.path.join(assets, name)
+    if os.path.isfile(path):
+        if os.path.getsize(path) != length:
+            raise Refused(f"{platform}: {name} is not {length} bytes")
+        if sha256_file(path) != sha256:
+            raise Refused(f"{platform}: {name} does not have the metadata's SHA-256")
+
+
+def signed_package(meta):
+    """The pkg the service installs silently, when the release signed it."""
+    return meta["install_file"] if meta.get("install_ed_signature") else None
+
+
 def release_order(pointer):
     """What "newer" compares: the version's numbers, then the build."""
     return tuple(int(part) for part in pointer["version"].split(".")) + (pointer["build"],)
@@ -275,6 +332,12 @@ def build(assets, tag, channel, download_base, site_base, out, current=None, all
                 raise Refused(f"{platform}: {meta['file']} is missing: --installers-on-site puts it in the site")
             build_number = meta["build"][len(meta["version"]) + 1:]
             copies[installer_path(channel, meta["version"], build_number, meta["file"])] = source
+            package = signed_package(meta)
+            if package:
+                source = os.path.join(assets, package)
+                if not os.path.isfile(source):
+                    raise Refused(f"{platform}: {package} is missing: --installers-on-site puts it in the site")
+                copies[installer_path(channel, meta["version"], build_number, package)] = source
     pointer = build_pointer(metas, tag, channel, download_base, site_base, installers_on_site)
     if current is not None and not allow_downgrade:
         refuse_downgrade(pointer, current, channel)
@@ -304,7 +367,7 @@ def main(argv=None):
     b.add_argument("--site-base", required=True)
     b.add_argument("--out", required=True)
     b.add_argument("--installers-on-site", action="store_true",
-                   help="put the macOS and Windows installers in the site and point the feeds there")
+                   help="put the macOS and Windows installers (and the signed macOS pkgs) in the site and point the feeds there")
     b.add_argument("--current", help="the channel's published pointer; the release must be newer")
     b.add_argument("--allow-downgrade", action="store_true", help="publish even if not newer than --current")
     c = commands.add_parser("check")

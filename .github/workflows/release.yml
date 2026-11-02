@@ -1787,7 +1787,9 @@ jobs:
       # The newest release's macOS and Windows installers are copied into the
       # site, which the Sparkle feeds' enclosures name (update_site.py
       # --installers-on-site): pkg is CDN-cached, GitHub's release downloads
-      # are slow from some networks. The release's assets stay as they are.
+      # are slow from some networks. So are the macOS .pkg files, which the
+      # privileged service installs silently when the release signed them
+      # (#548). The release's assets stay as they are.
       - name: Download their Linux packages, and the newest release's metadata and installers
         if: ${{ !inputs.rehearsal }}
         run: |
@@ -1800,7 +1802,7 @@ jobs:
           newest=$(head -n 1 tags)
           mkdir newest
           gh release download "$newest" --repo "$GITHUB_REPOSITORY" --dir newest \
-            --pattern 'release-meta-*.json' --pattern '*.dmg' --pattern '*-setup.exe'
+            --pattern 'release-meta-*.json' --pattern '*.dmg' --pattern '*.pkg' --pattern '*-setup.exe'
           echo "NEWEST=$newest" >> "$GITHUB_ENV"
       # A rehearsal's files come from the calling run, laid out as the one
       # release there is.
@@ -1823,7 +1825,7 @@ jobs:
           echo "$TAG" > tags
           mkdir -p "linux-releases/$TAG" newest "sums/$TAG"
           cp rehearsal-release/release-meta-linux-x64-*.json rehearsal-release/*.deb rehearsal-release/*.rpm "linux-releases/$TAG/"
-          cp rehearsal-release/release-meta-*.json rehearsal-release/*.dmg rehearsal-release/*-setup.exe newest/
+          cp rehearsal-release/release-meta-*.json rehearsal-release/*.dmg rehearsal-release/*.pkg rehearsal-release/*-setup.exe newest/
           cp rehearsal-release/SHA256SUMS "sums/$TAG/SHA256SUMS"
           echo "NEWEST=$TAG" >> "$GITHUB_ENV"
       # The site redistributes only what the release workflow produced: every
