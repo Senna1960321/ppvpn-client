@@ -80,6 +80,9 @@ Future<void> main() async {
     // idle silent update (#548).
     background = rust.startedInBackground() || (!mobile && rust.startHidden());
     rust.refreshLaunchAtLogin();
+    // A silent update downloaded earlier goes to the service before the
+    // client starts (#548); the app quits once it is accepted.
+    if (!mobile && rust.launchInstallPending() && await _installAtLaunch(background)) exit(0);
     app = AppState(rust.start());
     mark('client_created');
   }
@@ -91,30 +94,7 @@ Future<void> main() async {
     return;
   }
 
-  await windowManager.ensureInitialized();
-  mark('window_manager_ready');
-  await windowManager.waitUntilReadyToShow(
-    const WindowOptions(
-      size: Tokens.windowSize,
-      minimumSize: Tokens.windowMinSize,
-      center: true,
-      title: 'PPVPN',
-      // The sidebar runs to the top; macOS keeps its traffic lights over it.
-      titleBarStyle: TitleBarStyle.hidden,
-    ),
-    () async {
-      mark('ready_to_show');
-      // The runners leave the window hidden (ci-build.sh); macOS shows its
-      // own at launch.
-      if (background) {
-        await windowManager.hide();
-        return;
-      }
-      await windowManager.show();
-      await windowManager.focus();
-      mark('window_shown');
-    },
-  );
+  await _readyWindow(background);
   await windowManager.setPreventClose(true);
 
   // An update is being installed (#548): the app says so, connects
@@ -125,7 +105,7 @@ Future<void> main() async {
       exit(0);
     }
 
-    runApp(PrototypeApp(app: app, installing: done));
+    runApp(PrototypeApp(app: app, notice: InstallingNotice(onDone: done)));
     // Its close button quits too, as does the Windows installer's quit.
     windowManager.addListener(_QuitOnClose(done));
     listenForActivations(onShow: () {}, onPush: (_) {}, onQuit: done, onUserQuit: done, onUpdate: () {});
@@ -213,6 +193,56 @@ Future<void> main() async {
   unawaited(WidgetsBinding.instance.waitUntilFirstFrameRasterized.then((_) => mark('first_frame')));
 }
 
+Future<void>? _window;
+
+/// The window, on screen or (a launch into the tray) hidden; set up once,
+/// by the launch's install or after the client starts.
+Future<void> _readyWindow(bool background) => _window ??= _setUpWindow(background);
+
+Future<void> _setUpWindow(bool background) async {
+  await windowManager.ensureInitialized();
+  mark('window_manager_ready');
+  await windowManager.waitUntilReadyToShow(
+    const WindowOptions(
+      size: Tokens.windowSize,
+      minimumSize: Tokens.windowMinSize,
+      center: true,
+      title: 'PPVPN',
+      // The sidebar runs to the top; macOS keeps its traffic lights over it.
+      titleBarStyle: TitleBarStyle.hidden,
+    ),
+    () async {
+      mark('ready_to_show');
+      // The runners leave the window hidden (ci-build.sh); macOS shows its
+      // own at launch.
+      if (background) {
+        await windowManager.hide();
+        return;
+      }
+      await windowManager.show();
+      await windowManager.focus();
+      mark('window_shown');
+    },
+  );
+}
+
+/// The launch's install (#548, docs/host-integration.md section 16.1),
+/// UpdatingNotice meanwhile unless the launch is into the tray; true when
+/// the service accepted it. Otherwise the launch carries on (closing the
+/// window meanwhile hides it, as later).
+Future<bool> _installAtLaunch(bool background) async {
+  await _readyWindow(background);
+  final close = _HideOnClose();
+  if (!background) {
+    await windowManager.setPreventClose(true);
+    windowManager.addListener(close);
+    runApp(const PrototypeApp(notice: UpdatingNotice()));
+  }
+  final accepted = await rust.silentUpdateInstallAtLaunch(hidden: background);
+  windowManager.removeListener(close);
+  return accepted;
+}
+
 class _HideOnClose with WindowListener {
   @override
   void onWindowClose() => unawaited(windowManager.hide());
@@ -238,16 +268,17 @@ bool _notConnected(rust.UiSnapshot snapshot) => switch (snapshot.phase) {
 };
 
 class PrototypeApp extends StatefulWidget {
-  const PrototypeApp({super.key, required this.app, this.tray, this.installing});
+  const PrototypeApp({super.key, this.app, this.tray, this.notice});
 
-  final AppState app;
+  /// None only with a [notice].
+  final AppState? app;
 
   /// Held for the app's life; none on Android and iOS.
   final Tray? tray;
 
-  /// The service is installing an update: InstallingNotice in place of the
-  /// pages, quitting with this.
-  final VoidCallback? installing;
+  /// A silent update's whole-window notice (InstallingNotice,
+  /// UpdatingNotice) in place of the pages.
+  final Widget? notice;
 
   @override
   State<PrototypeApp> createState() => _PrototypeAppState();
@@ -307,18 +338,18 @@ class _PrototypeAppState extends State<PrototypeApp> {
               child: ColoredBox(
                 color: t.bg,
                 child: LayoutBuilder(
-                  builder: (context, box) => widget.installing != null
-                      ? InstallingNotice(onDone: widget.installing!)
+                  builder: (context, box) => widget.notice != null
+                      ? widget.notice!
                       : mobile
                       ? Center(
                           child: ConstrainedBox(
                             constraints: const BoxConstraints(maxWidth: Tokens.phoneMaxWidth),
-                            child: PhoneShell(app: widget.app),
+                            child: PhoneShell(app: widget.app!),
                           ),
                         )
                       : box.maxWidth < Tokens.phoneBreakpoint
-                      ? PhoneShell(app: widget.app)
-                      : Shell(app: widget.app),
+                      ? PhoneShell(app: widget.app!)
+                      : Shell(app: widget.app!),
                 ),
               ),
             ),
