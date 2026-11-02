@@ -78,8 +78,6 @@ Future<void> main() async {
     Settings.load();
     // In the tray also when the service opened the app again after an
     // idle silent update (#548).
-    // The service opened the app again after the user had quit it (#548).
-    if (!mobile && rust.quitAfterRelaunch()) exit(0);
     background = rust.startedInBackground() || (!mobile && rust.startHidden());
     rust.refreshLaunchAtLogin();
     app = AppState(rust.start());
@@ -135,8 +133,18 @@ Future<void> main() async {
     await windowManager.focus();
     return;
   }
-  // Not installing: the mark for the tray has done its part.
-  if (samplePage == null) rust.clearStartHidden();
+  if (samplePage == null) {
+    // The service opened the app again after the user had quit it: in the
+    // tray (startHidden), and quits now. After installingNow, so that a
+    // launch during the install still says so; the marks stay for the
+    // service's own launch afterwards.
+    if (rust.quitAfterRelaunch()) {
+      app.stop();
+      exit(0);
+    }
+    // Not installing: the mark for the tray has done its part.
+    rust.clearStartHidden();
+  }
 
   Tray? tray;
   // With [update], a silent update that is ready goes to the service once
