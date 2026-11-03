@@ -25,13 +25,15 @@
 
 安装包都是 Flutter 版（`apps/flutter`，#401）：`apps/flutter/scripts/ci-build.sh` 构建 app，再由
 `package-linux.sh`、`tools/desktop/ci/build-macos-native.sh`（经 `package-macos.sh`）、`package-windows.ps1` 打包，
-文件名、更新源和签名都和原生版相同，已装的原生版原地升级。原生版已删除（#522），macOS 只留推送代理和打包。
+更新源和签名沿用原生版，已装的原生版原地升级。macOS 更新归档改为 ZIP，首次安装仍用 .pkg。
+原生版已删除（#522），macOS 只留推送代理和打包。
 
-- 每次合入 main：`linux`（deb 和 rpm）、`macos`（每个架构一个 ZIP 和 .pkg）、`windows`（NSIS）构建安装包，不读任何密钥
+- 每次合入 main：`linux`（deb 和 rpm）、`macos`（arm64 的 ZIP 和 .pkg）、`windows`（NSIS）构建安装包，不读任何密钥
   （Windows 不签名、macOS ad-hoc 签名、没有更新签名），作为 workflow artifact；`linux-smoke` 把 deb 和 rpm 各离线安装一次（依赖包来自缓存，在 main 上保存），
   `linux-repo` 用这些包自测 apt/dnf 仓库。什么都不发布。
 - 手动触发 `channel=stable`：在 tag `vX.Y.Z`（0.6.0 及以后；桌面端、CLI 和引擎同一个版本、同一个 Release）上，
-  经 `desktop-release-approval` 审批，在 `desktop-release-stable` 里构建并签名，`release-files` 整体核对，
+  经 `desktop-release-approval` 审批，在 `desktop-release-stable` 里构建并签名（macOS 的 arm64 和 x86_64 各一份 ZIP 和 .pkg），
+  `release-files` 整体核对，
   `publish` 发 GitHub Release，`site` 重建更新站点，`site-deploy` 上传到 R2（`https://pkg.peakpassvpn.com`）。
   `rehearsal` 只出草稿 Release 和站点 artifact `site`，不上传。
 - 手动触发 `channel=dev`：在 main 上、`desktop-release-dev` 里构建，从不发布。

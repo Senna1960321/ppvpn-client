@@ -32,11 +32,11 @@ TUN 或路由出问题、机器连不上时能自己恢复；确认还能登录�
 
 ## macOS
 
-- [ ] 首次安装（.pkg）：浏览器下载 `PPVPN-<版本>-macos-<架构>.pkg`，打开时系统拦截，经「系统设置 → 隐私与安全性 →
-      仍要打开」一次后由安装器装好；`/Applications/PPVPN.app` 属于当前用户（`ls -ld`），没有 `com.apple.quarantine`，
+- [ ] 首次安装（.pkg）：浏览器下载正式发布的 `PPVPN-<版本>-macos-<架构>.pkg`，确认 Developer ID 签名和公证有效，
+      无需「仍要打开」放行，由安装器正常安装；`/Applications/PPVPN.app` 属于当前用户（`ls -ld`），没有 `com.apple.quarantine`，
       打开时不再提示，进程路径是 `/Applications/PPVPN.app/...`（没有被移位到 AppTranslocation）。
 - [ ] 首次安装后增强模式：第一次增强连接要一次管理员密码（安装特权服务），之后连上。
-- [ ] PKG 首次安装：安装到「应用程序」后能正常启动；当前版和 0.6.0 之前的旧版都能通过 Sparkle 从 DMG 更新到 ZIP，更新后无 Gatekeeper 提示。
+- [ ] Sparkle ZIP 更新：分别从当前版和 0.6.0 之前的旧版更新到 ZIP 构建（新版与 legacy feed 各一次），更新后能正常启动，无 Gatekeeper 提示。
 - [ ] 应用内更新（Sparkle）：更新安装后直接打开，不需要再次放行。
 - [ ] Sparkle 更新时推送助手先退出：安装前应用注销 PPVPN Agent（日志 `push agent: unregistered for the update`），
       系统日志里没有 `Launch Constraint Violation`，也没有新的"PPVPN Agent"崩溃报告；新版启动后几秒内

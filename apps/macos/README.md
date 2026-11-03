@@ -53,9 +53,10 @@ and runs `packaging/postinstall`, which hands the bundle to the console user
 so that Sparkle updates it without an administrator prompt
 (docs/security.md). `SPARKLE_PRIVATE_KEY_FILE` fills `ed_signature` and
 `install_ed_signature`: the privileged service checks the package with the
-same key before it installs it silently (#548). CI
-(`tools/desktop/ci/build-macos-native.sh`) builds both architectures on an
-Apple silicon runner into one artifact.
+same key before it installs it silently (#548). The release workflow runs
+`tools/desktop/ci/build-macos-native.sh` separately for each architecture on
+Apple silicon runners, with an artifact per architecture. A merge builds
+arm64; manual runs build both arm64 and x86_64.
 
 ## Signing and installing
 
