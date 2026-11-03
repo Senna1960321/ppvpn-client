@@ -89,8 +89,8 @@ Azure Artifact Signing 给程序、安装包和卸载程序签 Authenticode（#4
 - 最新版本的 macOS `.pkg`（同一目录）：特权服务静默安装用它（#548，[宿主接入第 16 节](host-integration.md)）。
   发布用 Sparkle 的同一把 EdDSA 钥匙给 pkg 签名（release-meta 的 `install_ed_signature`），频道指针的 macOS
   平台项有 `install_file`、`install_url`、`install_length`、`install_sha256`、`install_ed_signature`。release-meta
-  里没有这个签名的版本（#548 以前）不放 pkg，指针也没有这些字段，应用照旧用 Sparkle 的提示。两个 DMG、两个 pkg
-  加 Windows 安装包，每个版本约 275 MB；
+  里没有这个签名的版本（#548 以前）不放 pkg，指针也没有这些字段，应用照旧用 Sparkle 的提示。两个 macOS 更新归档、两个 pkg
+  加 Windows 安装包；
 - `linux/`：apt 仓库（`linux/apt`，suite `stable`，保留最近 5 个版本的 deb）、dnf 仓库（`linux/rpm/stable`，
   rpm 本身从 GitHub Release 下载）、安装源设置包、公钥和 `linux/stable/latest.json`（Linux 应用的更新检查）；
 - 已停用的 dev 频道：`linux/dev/latest.json` 和 `desktop/dev/appcast-<平台>.xml` 是 stable 的副本，让以前装的
@@ -132,12 +132,12 @@ artifact `site` 保留三天，并在日志里打出上传的顺序和缓存设�
 - `clients/desktop/native/releases/<版本>/<构建号>/<安装包>` 和同目录的 `release-meta-<平台>.json`，不可变；
 - `clients/desktop/native/channels/stable/release-meta-<平台>.json`：指针，即 release-meta 加上 `path`（安装包的 key）。
 
-macOS 从 0.6.2 起另有首次安装用的 `PPVPN-<版本>-macos-<架构>.pkg`（与 DMG 同在 Release、SHA256SUMS 和 provenance 里）。
-它的 release-meta 里 `file`、`length`、`sha256`、`ed_signature` 仍是 DMG 的（Sparkle 更新用），另加
+macOS 从 0.6.2 起另有首次安装用的 `PPVPN-<版本>-macos-<架构>.pkg`（与更新归档同在 Release、SHA256SUMS 和 provenance 里）。
+它的 release-meta 里 `file`、`length`、`sha256`、`ed_signature` 是 ZIP 的（Sparkle 更新用，旧版发布为 DMG），另加
 `install_file`、`install_length`、`install_sha256`；上传时指针再加 `install_path`（`.pkg` 的 key，与 `path` 同一个
 `<版本>/<构建号>` 目录）。这四项要么都有且都对，要么都没有；只允许出现在 macOS 上。后端遇到不全或不对的一组会让整个
 指针 503（下载和旧版更新源一起停），所以 `upload-downloads.sh` 在 `--plan` 阶段就按同样的规则拒绝，演练和 PR 的测试
-都能发现。有这四项时 `/download` 给 `.pkg`，后端的旧版更新源仍指向 DMG。
+都能发现。有这四项时 `/download` 给 `.pkg`，后端的旧版更新源指向 `file` 所描述的更新归档（新版 ZIP、旧版 DMG）。
 
 `downloads-deploy`（`tools/desktop/ci/upload-downloads.sh`）在 GitHub Release 发出之后，用同一批文件（artifact
 `release-files`）上传：先按 release-meta 核对每个安装包（长度、SHA-256，macOS 和 Windows 还要 `ed_signature`），

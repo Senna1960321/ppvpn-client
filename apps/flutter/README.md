@@ -217,7 +217,7 @@ Then `apps/macos/scripts/package-app.sh` does the rest. It thins the bundle
 to the one architecture and signs it inside out with the hardened runtime
 and `packaging/macos/PPVPN.entitlements`. It signs with the fixed certificate the service
 pins when `PPVPN_CODESIGN_IDENTITY` is set, ad-hoc otherwise. It then writes
-`PPVPN-<version>-<platform>.dmg` (with the Sparkle signature when
+`PPVPN-<version>-<platform>.zip` (with the Sparkle signature when
 `SPARKLE_PRIVATE_KEY_FILE` is set), the `.pkg` (id
 `com.peakpassvpn.ppvpn.desktop.pkg`, with the native postinstall, and the
 same signature for the service's silent updates, #548) and
@@ -230,7 +230,7 @@ build, and checks the heartbeat every five minutes, with `launchctl
 kickstart` and a rate-limited re-registration.
 
 CI (job `flutter`, macOS) packages the arm64 slice ad-hoc with the client
-and the helpers in debug. It checks the bundle, the signatures, the DMG,
+and the helpers in debug. It checks the bundle, the signatures, the ZIP,
 the expanded `.pkg` and release-meta. release.yml's `macos` job builds the
 app universal (`MACOS_ARCHS="arm64 x86_64"`) and packages both
 architectures through `tools/desktop/ci/build-macos-native.sh`

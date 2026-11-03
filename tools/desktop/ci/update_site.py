@@ -50,7 +50,7 @@ The pointer (schema 2):
 
 The macOS install_* fields are the .pkg the privileged service installs
 silently (#548, docs/host-integration.md section 16). With
---installers-on-site the pkg is copied into the site like the DMG. A
+--installers-on-site the pkg is copied into the site like the update archive. A
 release whose metadata has no install_ed_signature (before #548, or built
 without the update key) has none of them, and the apps keep Sparkle's
 prompt.

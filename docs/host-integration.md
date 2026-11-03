@@ -620,7 +620,7 @@ iOS 和 Android 上，引擎运行在系统要求的隧道进程里：Android �
 安装包和签名的来源：
 
 - **Windows**：appcast 和频道指针里现有的 `setup.exe` 及其 `ed_signature`、`length`，安装参数是 `/S`。
-- **macOS**：Sparkle 现在用的 DMG 不变（手动"检查更新…"和回退还用它）。静默更新用 `.pkg`。发布已经给 pkg 签 Developer ID Installer、公证并装订公证票据（`package-app.sh`），这里另需：给 pkg 也做 EdDSA 签名，频道指针 `desktop/channels/stable.json` 的 macOS 平台项另加 `install_file`、`install_url`、`install_length`、`install_ed_signature`（发布元数据里已有 `install_file`、`install_length`）。这项发布改动和服务一起做，在服务之前合入。
+- **macOS**：Sparkle 用 ZIP 更新归档（#505；手动"检查更新…"和回退使用它，旧版发布仍为 DMG）。静默更新用 `.pkg`。发布已经给 pkg 签 Developer ID Installer、公证并装订公证票据（`package-app.sh`），这里另需：给 pkg 也做 EdDSA 签名，频道指针 `desktop/channels/stable.json` 的 macOS 平台项另加 `install_file`、`install_url`、`install_length`、`install_ed_signature`（发布元数据里已有 `install_file`、`install_length`）。这项发布改动和服务一起做，在服务之前合入。
 
 ### 16.3 服务的处理
 

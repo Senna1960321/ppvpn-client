@@ -18,29 +18,12 @@ PPVPN 的桌面客户端：三个平台都是 Flutter 版（`apps/flutter`），
 
 - **Windows**：运行 `PPVPN-<版本>-windows-x64-setup.exe`。
 - **Linux**：从 PPVPN 的 apt、dnf 仓库安装，之后的更新也从那里来，命令见 [apps/flutter/packaging/linux/README.md](../../apps/flutter/packaging/linux/README.md)。
-- **macOS**：打开 DMG（Apple 芯片用 `macos-arm64`，Intel 用 `macos-x64`），把 PPVPN 拖进"应用程序"。需要 macOS 13 或更新的系统。
+- **macOS**：打开 `PPVPN-<版本>-macos-<架构>.pkg`（Apple 芯片用 `macos-arm64`，Intel 用 `macos-x64`），安装器将应用放入「应用程序」。需要 macOS 13 或更新的系统。
 
-### macOS：首次打开被拦截
-
-macOS 版用 PPVPN 自己的固定证书签名，没有经过 Apple 公证（还没有 Apple Developer ID）。从浏览器下载后，系统会
-先拦下 DMG，再拦下应用，各要放行一次，提示是"无法验证……是否包含恶意软件"：
-
-1. **DMG**：双击 DMG，在提示里点"完成"；马上打开"系统设置 → 隐私与安全性"，拉到最下面的"安全性"一段，点
-   "已阻止使用 PPVPN.dmg"旁边的"仍要打开"，输入本机密码确认，DMG 挂载。
-2. **安装**：把 PPVPN 拖进"应用程序"，然后推出 DMG。不要在 DMG 里直接运行 PPVPN：那样运行的是系统隔离出来的
-   临时副本，放行它不算数。
-3. **应用**：从"应用程序"双击 PPVPN，在提示里点"完成"；再到"隐私与安全性"点"已阻止使用 PPVPN"旁边的"仍要打开"，
-   输入密码确认。
-
-macOS 13、14 也可以在访达里按住 Control 点（或右键点）DMG 和 PPVPN，选"打开"，再在对话框里点"打开"。
-
-不要用 `xattr -dr com.apple.quarantine` 去掉隔离标记来跳过这两步。去掉之后系统不再询问，也就不会记下你的放行；
-而 macOS 仍然不认这张证书，应用会停在启动前，Dock 图标一直跳、没有窗口。已经这样做了的话：在"活动监视器"里
-强制退出 PPVPN，把它移到废纸篓，重新下载 DMG，按上面的步骤再来一次。
-
-放行之后不会再问。应用内的自动更新不需要再放行：更新包由应用自己下载，用更新签名（EdDSA）校验。请只从官网或
-本仓库的 [Releases](https://github.com/peakpassvpn/ppvpn-client/releases) 下载，可以用 Release 里的 `SHA256SUMS`
-核对文件。
+macOS 正式发布的应用和 PKG 使用 Apple Developer ID 签名并经过公证。ZIP 是 Sparkle 的更新包，
+包含已装订公证票据的应用；首次安装使用 PKG。旧版本的 DMG 仍保留在原来的下载地址。
+应用内更新会校验 EdDSA 签名。请从官网或本仓库的
+[Releases](https://github.com/peakpassvpn/ppvpn-client/releases) 下载，并可用 Release 的 `SHA256SUMS` 核对文件。
 
 ## 日志位置（测试排障）
 

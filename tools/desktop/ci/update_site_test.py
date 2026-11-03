@@ -12,8 +12,8 @@ import update_site as site
 
 SPARKLE_NS = "{http://www.andymatuschak.org/xml-namespaces/sparkle}"
 FILES = {
-    "macos-arm64": "PPVPN-0.4.0-macos-arm64.dmg",
-    "macos-x64": "PPVPN-0.4.0-macos-x64.dmg",
+    "macos-arm64": "PPVPN-0.4.0-macos-arm64.zip",
+    "macos-x64": "PPVPN-0.4.0-macos-x64.zip",
     "windows-x64": "PPVPN-0.4.0-windows-x64-setup.exe",
     "linux-x64-deb": "ppvpn_0.4.0-1234_amd64.deb",
     "linux-x64-rpm": "ppvpn-0.4.0-1234.x86_64.rpm",
@@ -25,7 +25,7 @@ SITE = "https://updates.example.com"
 
 
 def package_name(platform):
-    return FILES[platform].replace(".dmg", ".pkg")
+    return FILES[platform].replace(".zip", ".pkg")
 
 
 def release(directory, channel="stable", version="0.4.0", build="1234", skip=(), with_files=True,
@@ -180,7 +180,7 @@ class Build(unittest.TestCase):
                 "install_sha256": hashlib.sha256(body).hexdigest(),
                 "install_ed_signature": "cGtnIHNpZ25hdHVyZQ==",
             })
-            # The feed still updates from the DMG.
+            # The feed still updates from the ZIP.
             root = ET.parse(os.path.join(self.out.name, "desktop", "stable", f"appcast-{platform}.xml")).getroot()
             self.assertTrue(root.find("channel/item/enclosure").get("url").endswith(FILES[platform]))
         self.assertFalse([key for key in pointer["platforms"]["windows-x64"] if key.startswith("install_")])
@@ -251,7 +251,7 @@ class Build(unittest.TestCase):
             "another version": {"linux-x64-deb": {"version": "0.4.1"}},
             "another build": {"linux-x64-rpm": {"build": "0.4.0.1235"}},
             "another channel": {"macos-arm64": {"channel": "dev"}},
-            "path in file": {"macos-arm64": {"file": "../x.dmg"}},
+            "path in file": {"macos-arm64": {"file": "../x.zip"}},
         }
         for name, overrides in cases.items():
             with self.subTest(name), tempfile.TemporaryDirectory() as assets, tempfile.TemporaryDirectory() as out:
@@ -359,7 +359,7 @@ class Check(unittest.TestCase):
             "local time": lambda p: p.update(published_at="2026-11-01T16:00:00+08:00"),
             "a platform missing": lambda p: p["platforms"].pop("linux-x64-rpm"),
             "http url": lambda p: p["platforms"]["macos-x64"].update(url="http://example.com/" + FILES["macos-x64"]),
-            "url of another file": lambda p: p["platforms"]["macos-x64"].update(url=DOWNLOAD + "/v0.4.0/other.dmg"),
+            "url of another file": lambda p: p["platforms"]["macos-x64"].update(url=DOWNLOAD + "/v0.4.0/other.zip"),
             "zero length": lambda p: p["platforms"]["windows-x64"].update(length=0),
             "short hash": lambda p: p["platforms"]["windows-x64"].update(sha256="abc"),
             "no signature": lambda p: p["platforms"]["windows-x64"].update(ed_signature=""),

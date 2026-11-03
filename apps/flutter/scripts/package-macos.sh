@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Packages the Flutter app (#401 step 5) as the native macOS release did
-# (#522 removed it): the same PPVPN.app layout, signing, DMG, .pkg and
+# (#522 removed it): the same PPVPN.app layout, signing, ZIP, .pkg and
 # release-meta.
 #
 # Usage: apps/flutter/scripts/package-macos.sh <PPVPN.app> arm64|x86_64
@@ -32,7 +32,7 @@
 #       Updater), and the Info.plist keys it reads: PPVPNUpdateFeedURL,
 #       SUPublicEDKey, SUEnableAutomaticChecks
 # then apps/macos/scripts/package-app.sh: thinning, inside-out signing with
-# packaging/macos/PPVPN.entitlements, and dist/macos/PPVPN-<version>-<platform>.dmg,
+# packaging/macos/PPVPN.entitlements, and dist/macos/PPVPN-<version>-<platform>.zip,
 # .pkg and release-meta-<platform>.json.
 set -euo pipefail
 

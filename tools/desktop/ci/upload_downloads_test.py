@@ -11,8 +11,8 @@ import unittest
 
 SCRIPT = pathlib.Path(__file__).with_name("upload-downloads.sh")
 PLATFORMS = {
-    "macos-arm64": "PPVPN-0.6.0-macos-arm64.dmg",
-    "macos-x64": "PPVPN-0.6.0-macos-x64.dmg",
+    "macos-arm64": "PPVPN-0.6.0-macos-arm64.zip",
+    "macos-x64": "PPVPN-0.6.0-macos-x64.zip",
     "windows-x64": "PPVPN-0.6.0-windows-x64-setup.exe",
     "linux-x64-deb": "PPVPN-0.6.0-linux-x64.deb",
     "linux-x64-rpm": "PPVPN-0.6.0-linux-x64.rpm",
@@ -56,6 +56,9 @@ elif operation == "put-object":
     shutil.copyfile(options["--body"], obj)
     (root / "cache" / options["--key"]).parent.mkdir(parents=True, exist_ok=True)
     (root / "cache" / options["--key"]).write_text(options["--cache-control"])
+    content_type = root / "content-type" / options["--key"]
+    content_type.parent.mkdir(parents=True, exist_ok=True)
+    content_type.write_text(options["--content-type"])
     if "--metadata" in options:
         meta.parent.mkdir(parents=True, exist_ok=True)
         meta.write_text(options["--metadata"].split("=", 1)[1])
@@ -161,6 +164,9 @@ class UploadDownloads(unittest.TestCase):
             self.assertEqual(
                 (self.bucket / "objects" / RELEASES / name).read_bytes(), (self.release / name).read_bytes()
             )
+        for platform in ("macos-arm64", "macos-x64"):
+            self.assertEqual((self.bucket / "content-type" / RELEASES / PLATFORMS[platform]).read_text(),
+                             "application/zip")
         cache = self.bucket / "cache"
         self.assertEqual((cache / RELEASES / PLATFORMS["macos-x64"]).read_text(), "public, max-age=31536000, immutable")
         self.assertEqual((cache / POINTERS / "release-meta-macos-x64.json").read_text(), "no-cache, no-store, must-revalidate")
@@ -234,7 +240,7 @@ class UploadDownloads(unittest.TestCase):
             "min_os is missing": lambda: self.write_meta("macos-arm64", min_os=""),
             "published_at": lambda: self.write_meta("macos-arm64", published_at="yesterday-ish"),
             "the release-meta is of macos-x64": lambda: self.write_meta("macos-arm64", platform="macos-x64"),
-            "unexpected file name": lambda: self.write_meta("macos-arm64", file="../x.dmg"),
+            "unexpected file name": lambda: self.write_meta("macos-arm64", file="../x.zip"),
             "release-meta-linux-x64-deb.json is missing": lambda: (self.release / "release-meta-linux-x64-deb.json").unlink(),
         }
         originals = {p.name: p.read_text() for p in self.release.glob("release-meta-*.json")}
@@ -253,7 +259,7 @@ class UploadDownloads(unittest.TestCase):
         signed: with their EdDSA signatures, as releases from #548 on."""
         names = {}
         for platform in ("macos-arm64", "macos-x64"):
-            name = PLATFORMS[platform].replace(".dmg", ".pkg")
+            name = PLATFORMS[platform].replace(".zip", ".pkg")
             content = f"package of {platform}".encode()
             (self.release / name).write_bytes(content)
             extra = {"install_ed_signature": f"signature of {name}"} if signed else {}
@@ -274,7 +280,7 @@ class UploadDownloads(unittest.TestCase):
         for platform, name in names.items():
             source = json.loads((self.release / f"release-meta-{platform}.json").read_text())
             pointer = json.loads((self.bucket / "objects" / POINTERS / f"release-meta-{platform}.json").read_text())
-            # The DMG stays in file/path (the Sparkle feeds); the package is install_*.
+            # The ZIP stays in file/path (the Sparkle feeds); the package is install_*.
             self.assertEqual(pointer, {
                 **source,
                 "path": f"{RELEASES}/{PLATFORMS[platform]}",
@@ -327,7 +333,7 @@ class UploadDownloads(unittest.TestCase):
             "does not have the release-meta's install_sha256": lambda: self.write_meta("macos-arm64", install_sha256="0" * 64),
             "does not have the release-meta's install_length": lambda: self.write_meta("macos-arm64", install_length=1),
             "unexpected install_file": lambda: self.write_meta("macos-arm64", install_file="../x.pkg"),
-            "PPVPN-0.6.0-macos-arm64.dmg.pkg is missing": lambda: self.write_meta("macos-arm64", install_file="PPVPN-0.6.0-macos-arm64.dmg.pkg"),
+            "PPVPN-0.6.0-macos-arm64.zip.pkg is missing": lambda: self.write_meta("macos-arm64", install_file="PPVPN-0.6.0-macos-arm64.zip.pkg"),
             # macOS only.
             "windows-x64: install_* fields are for macOS only":
                 lambda: self.write_meta("windows-x64", install_file=names["macos-arm64"], install_length=package.stat().st_size,

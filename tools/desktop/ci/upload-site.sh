@@ -80,6 +80,7 @@ content_type() {
     *.gz) echo "application/gzip" ;;
     *.xz) echo "application/x-xz" ;;
     *.zst) echo "application/zstd" ;;
+    *.zip) echo "application/zip" ;;
     *.dmg) echo "application/x-apple-diskimage" ;;
     *.exe) echo "application/vnd.microsoft.portable-executable" ;;
     *) echo "application/octet-stream" ;;
