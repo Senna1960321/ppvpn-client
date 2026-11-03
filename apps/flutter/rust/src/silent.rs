@@ -37,6 +37,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ppvpn_client::silent_update::{
     failure_kind, FailureKind, InstallAnswer, Latest, ServiceUpdates, SilentUpdater, UpdatePackage,
+    UpdateResult,
 };
 use serde::{Deserialize, Serialize};
 
@@ -53,6 +54,9 @@ const MAX_RETRIES: u32 = 20;
 const HIDDEN_FOR: Duration = Duration::from_secs(15 * 60);
 /// A channel unread this long goes back to the prompt.
 const LATER_FOR: Duration = Duration::from_secs(24 * 60 * 60);
+/// The whole install at launch, from the service's version to its answer:
+/// a launch at login has no tray icon meanwhile.
+const LAUNCH_FOR: Duration = Duration::from_secs(60);
 /// The app's own code for a download that failed its checks or stalled.
 const DOWNLOAD_FAILED: &str = "UPDATE_DOWNLOAD_FAILED";
 
@@ -350,9 +354,7 @@ pub(crate) async fn state() -> UiSilentUpdate {
                     updated_to = Some(last.version.clone());
                 }
             } else {
-                let code = last.error.as_deref().unwrap_or("UPDATE_INSTALL_FAILED");
-                tracing::warn!(build = last.build, code, "silent update failed");
-                saved.fail(last.build, code);
+                count_failure(saved, &last);
             }
         });
     }
@@ -446,22 +448,65 @@ pub(crate) fn launch_install_pending() -> bool {
     updater().is_some() && launch_package(&saved, build()).is_some()
 }
 
-/// See [`crate::api::silent_update_install_at_launch`].
+/// The service's last result, failed: counted for its build.
+fn count_failure(saved: &mut Saved, last: &UpdateResult) {
+    let code = last.error.as_deref().unwrap_or("UPDATE_INSTALL_FAILED");
+    tracing::warn!(build = last.build, code, "silent update failed");
+    saved.fail(last.build, code);
+}
+
+/// See [`crate::api::silent_update_install_at_launch`]: at most
+/// [`LAUNCH_FOR`], after which the launch carries on as with no answer.
 pub(crate) async fn install_at_launch(hidden: bool) -> bool {
+    match tokio::time::timeout(LAUNCH_FOR, launch(hidden)).await {
+        Ok(accepted) => accepted,
+        Err(_) => {
+            tracing::info!("silent update at launch: no answer in time");
+            *READY.lock().unwrap() = None;
+            if hidden {
+                clear_start_hidden();
+            }
+            false
+        }
+    }
+}
+
+async fn launch(hidden: bool) -> bool {
     let Some(updater) = updater() else {
         return false;
     };
     let Loaded::Read(saved) = read() else {
         return false;
     };
+    if launch_package(&saved, build()).is_none() {
+        return false;
+    }
+    // An install already under way is installingNow's to show.
+    let last_update = match updater.service_updates().await {
+        ServiceUpdates::Supported {
+            update: None,
+            last_update,
+            ..
+        } => last_update,
+        _ => return false,
+    };
+    // A failure not handled yet (an idle install's, the service then
+    // opening this app again) counts first: it may give the build up. A
+    // success is left to state(), for its notice.
+    if let Some(last) = last_update.filter(|last| {
+        last.outcome != "installed" && last.finished_at_ms > saved.seen_finished_at_ms
+    }) {
+        update(|saved| {
+            saved.seen_finished_at_ms = last.finished_at_ms;
+            count_failure(saved, &last);
+        });
+    }
+    let Loaded::Read(saved) = read() else {
+        return false;
+    };
     let Some(package) = launch_package(&saved, build()) else {
         return false;
     };
-    // An install already under way is installingNow's to show.
-    match updater.service_updates().await {
-        ServiceUpdates::Supported { update: None, .. } => {}
-        _ => return false,
-    }
     let Some(path) = updater.downloaded(&package).await else {
         tracing::info!(build = package.build, "silent update: saved package gone");
         update(|saved| saved.ready = None);

@@ -767,9 +767,14 @@ pub fn launch_install_pending() -> bool {
 /// updates and is not installing, and sends it with `relaunch`; true when
 /// the service accepted it and the app must now exit. With `hidden` (a
 /// launch into the tray) the app it opens again starts in the tray. Each
-/// build is tried at one launch only. Blocks a worker thread for up to the
-/// service's minute; on a runtime of its own, the client's is not there yet.
+/// build is tried at one launch only. Blocks a worker thread for at most a
+/// minute in all; on a runtime of its own, the client's is not there yet,
+/// and into the log file the client would otherwise open.
 pub fn silent_update_install_at_launch(hidden: bool) -> bool {
+    if let Ok((_, log_dir)) = crate::dirs::dirs() {
+        let app_version = format!("{}-flutter", crate::update::version());
+        ppvpn_client::install_logging(&log_dir, &app_version);
+    }
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
