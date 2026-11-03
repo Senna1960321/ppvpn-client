@@ -12,6 +12,7 @@ void main() {
   late List<(String, String?)> tokens;
   late List<int?> opened;
   late List<bool> foreground;
+  late List<bool> fallback;
   late List<String> calls;
 
   Future<void> event(String name, Object? arguments) async {
@@ -28,11 +29,13 @@ void main() {
     tokens = [];
     opened = [];
     foreground = [];
+    fallback = [];
     calls = [];
     push = MobilePush(
       onToken: (token, bundle) => tokens.add((token, bundle)),
       onOpen: (id) async => opened.add(id),
       onForeground: foreground.add,
+      onFallback: fallback.add,
     );
     binding.defaultBinaryMessenger.setMockMethodCallHandler(MobilePush.channel, (call) async {
       calls.add(call.method);
@@ -81,6 +84,16 @@ void main() {
     push.didChangeAppLifecycleState(AppLifecycleState.paused);
     push.didChangeAppLifecycleState(AppLifecycleState.resumed);
     expect(foreground.sublist(foreground.length - 3), [false, false, true]);
+  });
+
+  test('only boolean fallback events change the Android channel', () async {
+    await push.start();
+    for (final enabled in [true, 'true', 1, null, false]) {
+      await event('fallback', {'enabled': enabled});
+    }
+    expect(fallback, [true, false]);
+    expect(tokens, isEmpty);
+    expect(opened, isEmpty);
   });
 
   test('permission is requested separately and only once', () async {

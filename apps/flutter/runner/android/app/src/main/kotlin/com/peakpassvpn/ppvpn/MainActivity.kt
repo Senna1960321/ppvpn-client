@@ -15,6 +15,7 @@ import io.flutter.plugin.common.MethodChannel
 // in (#535). The system VPN's channels are VpnPlugin's.
 class MainActivity : FlutterActivity() {
     private var vpn: VpnPlugin? = null
+    private var push: PushPlugin? = null
 
     // A Custom Tab opened by open() is over this activity, in its task.
     private var tabOpen = false
@@ -34,6 +35,7 @@ class MainActivity : FlutterActivity() {
                 }
             }
         vpn = VpnPlugin(this, flutterEngine.dartExecutor.binaryMessenger)
+        push = PushPlugin(this, flutterEngine.dartExecutor.binaryMessenger).also { it.onIntent(intent) }
     }
 
     // A Custom Tab where the browser offers them, else the browser: the
@@ -72,9 +74,18 @@ class MainActivity : FlutterActivity() {
     override fun onResume() {
         super.onResume()
         tabOpen = false
+        push?.refresh()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        push?.onIntent(intent)
     }
 
     override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
+        push?.close()
+        push = null
         vpn?.close()
         vpn = null
         super.cleanUpFlutterEngine(flutterEngine)

@@ -6,12 +6,13 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 class MobilePush with WidgetsBindingObserver {
-  MobilePush({required this.onToken, required this.onOpen, required this.onForeground});
+  MobilePush({required this.onToken, required this.onOpen, required this.onForeground, this.onFallback});
 
   static const channel = MethodChannel('com.peakpassvpn.ppvpn/push');
   final void Function(String token, String? bundleId) onToken;
   final Future<void> Function(int? messageId) onOpen;
   final void Function(bool foreground) onForeground;
+  final void Function(bool enabled)? onFallback;
   bool _started = false;
   bool _asked = false;
 
@@ -45,7 +46,10 @@ class MobilePush with WidgetsBindingObserver {
   Future<void> _handle(MethodCall call) async {
     final args = call.arguments;
     if (args is! Map) return;
-    if (call.method == 'token') {
+    if (call.method == 'fallback') {
+      final enabled = args['enabled'];
+      if (enabled is bool) onFallback?.call(enabled);
+    } else if (call.method == 'token') {
       final token = args['token'];
       final bundleId = args['bundle_id'];
       if (token is! String || token.trim().isEmpty) return;

@@ -10,3 +10,10 @@
 
 # The saved sign-in's key (apps/flutter/rust src/android.rs): seal and open.
 -keep class com.peakpassvpn.ppvpn.Credentials { *; }
+
+# The self-hosted push agent runs in the VPN service and calls this listener.
+-keep class com.peakpassvpn.ppvpn.NativePushAgent { *; }
+-keep interface com.peakpassvpn.ppvpn.NativePushAgent$Listener { *; }
+-keep class * implements com.peakpassvpn.ppvpn.NativePushAgent$Listener { *; }
+
+-keep class com.peakpassvpn.ppvpn.NativePushToken { *; }

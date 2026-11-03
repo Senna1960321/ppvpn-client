@@ -162,9 +162,9 @@ impl PushAgent {
     }
 
     /// Pulls and shows pushes until [`Self::stop`]. Blocks the calling thread
-    /// (not a runtime thread).
+    /// (not a runtime thread). One run per agent: stop is latched even when
+    /// called before the worker enters run; create a new agent to restart.
     pub fn run(&self) {
-        let _ = self.stop.send(false);
         tracing::info!(
             platform = %self.config.platform,
             version = %self.config.app_version,
@@ -183,7 +183,7 @@ impl PushAgent {
     /// Makes `run` return promptly, aborting an in-flight long poll.
     /// Thread-safe.
     pub fn stop(&self) {
-        let _ = self.stop.send(true);
+        self.stop.send_replace(true);
     }
 
     /// Retries messages that could not be shown, now.
@@ -415,8 +415,12 @@ impl Engine {
     async fn run(mut self) {
         let heartbeat = tokio::spawn(heartbeat(self.data_dir.join(HEARTBEAT_FILE)));
         while !self.stopped() {
-            if self.tick().await {
-                break;
+            // Cancellation covers ACKs/response bodies as well as long polls;
+            // the VPN service must never wait for a network timeout to stop.
+            let mut stop = self.stop.clone();
+            tokio::select! {
+                _ = stop.wait_for(|stopped| *stopped) => break,
+                done = self.tick() => if done { break; },
             }
         }
         heartbeat.abort();
@@ -1027,6 +1031,51 @@ mod tests {
         std::thread::sleep(Duration::from_millis(100));
         let took = running.stop();
         assert!(took < Duration::from_secs(1), "stop took {took:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stop_interrupts_a_hanging_ack() {
+        let backend = Backend::new();
+        backend.add_push(1, "2099-01-01T00:00:00Z");
+        *backend.ack_delay.lock().unwrap() = Some(Duration::from_secs(5));
+        let base = serve(backend.clone());
+        let dir = temp_dir("ppvpn-agent-test");
+        write_file(&dir, &base, PUSH_TOKEN);
+        let running = start(&dir, Arc::new(Recorder::default()));
+        wait_until(|| !backend.requests_matching("/push/ack").is_empty());
+        let took = running.stop();
+        assert!(
+            took < Duration::from_secs(1),
+            "stop waited for the ACK: {took:?}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stop_before_the_worker_enters_run_is_not_lost() {
+        let dir = temp_dir("ppvpn-agent-test");
+        let agent = PushAgent::new(
+            PushAgentConfig {
+                data_dir: dir.clone(),
+                log_dir: dir.clone(),
+                platform: "android".into(),
+                app_version: "test".into(),
+            },
+            Arc::new(Recorder::default()),
+        );
+        agent.stop();
+        let (sent, received) = std::sync::mpsc::channel();
+        let worker = agent.clone();
+        let thread = std::thread::spawn(move || {
+            worker.run();
+            let _ = sent.send(());
+        });
+        let finished = received.recv_timeout(Duration::from_secs(2)).is_ok();
+        // Also cleanly stop the old implementation when used as a regression test.
+        agent.stop();
+        thread.join().unwrap();
+        assert!(finished, "a stop before run must remain latched");
         let _ = std::fs::remove_dir_all(dir);
     }
 

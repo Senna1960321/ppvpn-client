@@ -1208,6 +1208,13 @@ jobs:
           export ANDROID_NDK_HOME="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}"
           apps/flutter/scripts/ci-build.sh
           ls -l "${{ github.workspace }}/apps/flutter/build/app/outputs/flutter-apk"
+      - name: Native push regression tests
+        if: steps.scope.outputs.android == 'true'
+        run: |
+          python3 -m unittest discover -s apps/flutter/checks -p 'test_android_push_config.py'
+          export GRADLE="$GITHUB_WORKSPACE/apps/flutter/android/gradlew"
+          export PPVPN_TEST_FLUTTER_JAR="$RUNNER_TEMP/flutter-sdk/flutter/bin/cache/artifacts/engine/android-arm/flutter.jar"
+          apps/flutter/scripts/test-android-push.sh
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         timeout-minutes: 10
         if: steps.scope.outputs.android == 'true'

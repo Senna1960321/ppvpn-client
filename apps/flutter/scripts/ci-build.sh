@@ -21,6 +21,9 @@
 #   ANDROID_FORMAT       android: apk (the default; arm64 and x86_64, for a
 #                        phone or the emulator) or aab (the App Bundle for
 #                        Google Play: release.yml)
+#   ANDROID_GOOGLE_SERVICES_FILE
+#                        Android: Firebase config for com.peakpassvpn.ppvpn;
+#                        optional for local/CI fallback-only builds, never committed
 #   ANDROID_KEYSTORE_FILE, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS,
 #   ANDROID_KEY_PASSWORD
 #                        android: signed with this upload key (the Play
@@ -196,6 +199,7 @@ case $os in
     # The system VPN (runner/android TunnelService), in its own process:
     # only the system binds it.
     replace "$manifest" '^    </application>' '        <service android:name=".TunnelService" android:process=":tunnel"\n            android:exported="false" android:permission="android.permission.BIND_VPN_SERVICE">\n            <intent-filter>\n                <action android:name="android.net.VpnService"/>\n            </intent-filter>\n        </service>\n    </application>'
+    python3 scripts/configure-android-push.py android
     # The release build's signature: the upload key when one is given (its
     # path and secrets read by Gradle from the environment, never written
     # into the project), else the template's debug key.

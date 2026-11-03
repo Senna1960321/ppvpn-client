@@ -128,6 +128,7 @@ pub(crate) struct SessionState {
     pub(crate) notifications: crate::notifications::NotificationState,
     /// Desktop push registration of this session.
     pub(crate) device: crate::device::DeviceState,
+    pub(crate) android_push: crate::device::DeviceState,
     /// Once-per-second traffic sampler of this session.
     pub(crate) traffic_task: Option<tokio::task::JoinHandle<()>>,
     /// Connection monitor (replica and latency) of this session.
@@ -161,6 +162,7 @@ impl SessionState {
         self.refresh_wake = Arc::default();
         self.notifications.reset();
         self.device = crate::device::DeviceState::default();
+        self.android_push = crate::device::DeviceState::default();
         if let Some(task) = self.traffic_task.take() {
             task.abort();
         }
@@ -746,11 +748,13 @@ impl Client {
             let replaced = state.signed_in;
             let session = state.reset(true);
             state.access = Some(signed_in.access);
+            if replaced {
+                crate::device::remove_agent_files(&self.config.data_dir);
+            }
             (session, replaced)
         };
         if replaced {
-            // A different account on this install: the agent starts over.
-            crate::device::remove_agent_files(&self.config.data_dir);
+            // Its files were removed under the session lock before publication.
             self.on_session_ended();
         }
         self.update_session(session, |_, snapshot| {

@@ -1359,6 +1359,17 @@ jobs:
           (umask 077 && base64 -d <<<"$ANDROID_UPLOAD_KEYSTORE" > "$keystore")
           echo "ANDROID_KEYSTORE_FILE=$keystore" >> "$GITHUB_ENV"
           echo "SIGNED=true" >> "$GITHUB_ENV"
+      - name: Firebase Android configuration
+        env:
+          ANDROID_GOOGLE_SERVICES_JSON: ${{ secrets.ANDROID_GOOGLE_SERVICES_JSON }}
+        run: |
+          if [ -z "$ANDROID_GOOGLE_SERVICES_JSON" ]; then
+            echo "::warning::No Firebase Android configuration: FCM is unavailable; this build uses VPN-service fallback only"
+            exit 0
+          fi
+          config="$RUNNER_TEMP/ppvpn-google-services.json"
+          (umask 077 && printf '%s' "$ANDROID_GOOGLE_SERVICES_JSON" > "$config")
+          echo "ANDROID_GOOGLE_SERVICES_FILE=$config" >> "$GITHUB_ENV"
       - id: build
         name: Build the App Bundle
         env:
@@ -1381,6 +1392,9 @@ jobs:
         run: >-
           tools/desktop/ci/play_upload.py com.peakpassvpn.ppvpn "$AAB" internal
           "$PPVPN_VERSION ($PPVPN_BUILD_NUMBER)"
+      - name: Remove Firebase configuration
+        if: always() && env.ANDROID_GOOGLE_SERVICES_FILE != ''
+        run: rm -f -- "$ANDROID_GOOGLE_SERVICES_FILE" apps/flutter/android/app/google-services.json
       - name: Remove the upload key
         if: always() && env.ANDROID_KEYSTORE_FILE != ''
         run: rm -f "$ANDROID_KEYSTORE_FILE"

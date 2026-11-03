@@ -32,7 +32,7 @@ class VpnPlugin(private val activity: Activity, messenger: BinaryMessenger) :
             when (call.method) {
                 "prepare" -> prepare(result)
                 "start" -> {
-                    activity.startService(TunnelService.intent(activity, TunnelService.ACTION_START))
+                    activity.startForegroundService(TunnelService.intent(activity, TunnelService.ACTION_START))
                     result.success(null)
                 }
                 "stop" -> {
