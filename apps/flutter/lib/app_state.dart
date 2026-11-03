@@ -40,6 +40,7 @@ enum WindowPage { messages, settings }
 
 class AppState {
   AppState(rust.UiSnapshot initial) : fixed = false, snapshot = ValueNotifier(initial) {
+    _listenForAccountChanges();
     _refreshNodes(initial);
     if (mobile) SystemVpn.listen();
     unawaited(_pump());
@@ -49,6 +50,7 @@ class AppState {
   /// screenshots): nothing is read from Rust, actions fail quietly.
   AppState.fixed(rust.UiSnapshot initial) : fixed = true, snapshot = ValueNotifier(initial) {
     _stopped = true;
+    _listenForAccountChanges();
   }
 
   /// Made by [AppState.fixed]: sample data, no client.
@@ -77,6 +79,19 @@ class AppState {
 
   /// The message center's list.
   late final MessagesState messages = MessagesState(fixed: fixed, onError: (error) => actionError.value = error);
+  // Session changes invalidate inbox loads as well as cached bodies. Observe
+  // snapshots here so the same boundary applies to fixed/sample state.
+  void _listenForAccountChanges() {
+    var previous = snapshot.value;
+    snapshot.addListener(() {
+      final next = snapshot.value;
+      if (previous.auth != next.auth || previous.accountName != next.accountName || previous.teamId != next.teamId) {
+        messages.clear();
+      }
+      previous = next;
+    });
+  }
+
   /// Bumped when the tray turns enhanced mode on before the service is
   /// installed: the window shows the install explanation first (shell.dart).
   final ValueNotifier<int> enhancedRequests = ValueNotifier(0);
@@ -121,6 +136,16 @@ class AppState {
       showPage(WindowPage.messages);
     }
     return true;
+  }
+
+  /// APNs / FCM taps name an inbox message rather than the desktop agent's
+  /// local push id. Load its body (and link) through the current account.
+  Future<void> openMobileMessage(int? messageId) async {
+    if (fixed) return;
+    await _restored();
+    if (snapshot.value.auth != rust.UiAuth.signedIn) return;
+    messages.requestOpen((messageId: messageId, push: null));
+    showPage(WindowPage.messages);
   }
 
   /// Until the saved sign-in has been read: a click can start the app.
