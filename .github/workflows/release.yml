@@ -1165,6 +1165,7 @@ jobs:
       MACOS_SIGNING_P12_PASSWORD: ${{ needs.prepare.outputs.environment && secrets.MACOS_SIGNING_P12_PASSWORD || '' }}
       MACOS_INSTALLER_P12_BASE64: ${{ needs.prepare.outputs.environment && secrets.MACOS_INSTALLER_P12_BASE64 || '' }}
       MACOS_INSTALLER_P12_PASSWORD: ${{ needs.prepare.outputs.environment && secrets.MACOS_INSTALLER_P12_PASSWORD || '' }}
+      MACOS_APNS_PROFILE_BASE64: ${{ needs.prepare.outputs.environment && secrets.MACOS_APNS_PROFILE_BASE64 || '' }}
       ASC_KEY_ID: ${{ needs.prepare.outputs.environment && secrets.ASC_KEY_ID || '' }}
       ASC_ISSUER_ID: ${{ needs.prepare.outputs.environment && secrets.ASC_ISSUER_ID || '' }}
       ASC_KEY_P8: ${{ needs.prepare.outputs.environment && secrets.ASC_KEY_P8 || '' }}

@@ -25,9 +25,8 @@
 #   PPVPN_SOURCE_PACKAGES      the Xcode build's SourcePackages, where Sparkle's
 #                              sign_update is (needed with SPARKLE_PRIVATE_KEY_FILE)
 #
-# The app is changed in place. It must hold the push agent
-# (Contents/Library/LoginItems/PPVPN Agent.app), the one shared
-# PPVPNClientFFI.framework and the service helpers in Contents/MacOS.
+# The app is changed in place. It must hold the service helpers in
+# Contents/MacOS. The retired push agent and PPVPNClientFFI are forbidden.
 #
 # Output (dist/macos), <platform> = macos-arm64 | macos-x64:
 #   PPVPN-<version>-<platform>.dmg   Sparkle's updates and manual installs
@@ -177,14 +176,13 @@ while IFS= read -r bundle; do [[ -n "$bundle" ]] && sign "$bundle"; done <<< "$B
 sign "$APP"
 
 # --- Checks ------------------------------------------------------------------
-AGENT="$APP/Contents/Library/LoginItems/PPVPN Agent.app"
 # Each bundle on its own first, so that a failure names it.
 while IFS= read -r bundle; do
   [[ -z "$bundle" ]] || codesign --verify --strict --verbose=2 "$bundle"
 done <<< "$BUNDLES"
 codesign --verify --deep --strict --verbose=4 "$APP"
 if [[ -n "$CERT_SHA1" ]]; then
-  for bundle in "$APP" "$AGENT"; do
+  for bundle in "$APP"; do
     codesign -dr - "$bundle" 2>&1 | grep -qi "certificate leaf = H\"$CERT_SHA1\"" \
       || { echo "error: $bundle lacks the pinned designated requirement" >&2; exit 1; }
   done
@@ -199,18 +197,11 @@ done
 while IFS= read -r file; do
   [[ "$(lipo -archs "$file")" == "$ARCH" ]] || { echo "error: $file is not $ARCH only" >&2; exit 1; }
 done < "$MACHO"
-FFI="$(find "$APP" -type d -name 'PPVPNClientFFI.framework')"
-[[ "$FFI" == "$APP/Contents/Frameworks/PPVPNClientFFI.framework" ]] \
-  || { echo "error: expected one PPVPNClientFFI.framework in Contents/Frameworks, found: $FFI" >&2; exit 1; }
-# The agent links the shared framework (the app's own client is its bridge
-# library, libppvpn_flutter.dylib), and not Sparkle: it depends on Sparkle
-# only so that its build resolves it (project.yml).
-AGENT_EXE="$AGENT/Contents/MacOS/PPVPN Agent"
-otool -L "$AGENT_EXE" | grep -q '@rpath/PPVPNClientFFI.framework/Versions/A/PPVPNClientFFI' \
-  || { echo "error: $AGENT_EXE does not link the shared PPVPNClientFFI" >&2; exit 1; }
-if otool -L "$AGENT_EXE" | grep -q Sparkle; then
-  echo "error: $AGENT_EXE links Sparkle" >&2; exit 1
-fi
+# macOS notifications now use APNs. Neither the old executable nor its
+# duplicate client framework may survive into an update artifact.
+[[ ! -e "$APP/Contents/Library/LoginItems/PPVPN Agent.app" && \
+   ! -e "$APP/Contents/Frameworks/PPVPNClientFFI.framework" ]] ||
+  { echo "error: retired push-agent code is still bundled" >&2; exit 1; }
 for bin in ppvpn-service ppvpn-service-install ppvpn-service-uninstall; do
   [[ -f "$APP/Contents/MacOS/$bin" ]] || { echo "error: $bin missing" >&2; exit 1; }
 done
@@ -326,7 +317,9 @@ if [[ -n "$INSTALLER_IDENTITY" ]]; then
     && pkgutil --check-signature "$PKG" | grep -qF "($TEAM)" \
     || { echo "error: $PKG is not signed by the Developer ID Installer of $TEAM" >&2; exit 1; }
 fi
-pkgutil --payload-files "$PKG" | grep -qx './PPVPN.app/Contents/MacOS/PPVPN' \
+# Consume the complete payload listing: grep -q closes the pipe early,
+# making pkgutil fail under pipefail even when the app is present.
+pkgutil --payload-files "$PKG" | grep -x './PPVPN.app/Contents/MacOS/PPVPN' >/dev/null \
   || { echo "error: $PKG does not install PPVPN.app" >&2; exit 1; }
 echo "wrote $PKG"
 

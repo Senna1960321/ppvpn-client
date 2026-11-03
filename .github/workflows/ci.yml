@@ -869,10 +869,13 @@ jobs:
         env:
           PPVPN_SKIP_ANALYZE: ${{ matrix.os != 'ubuntu-latest' && '1' || '' }}
         run: apps/flutter/scripts/ci-build.sh
-      - name: Mobile push bridge tests
+      - name: Push bridge tests
         if: steps.scope.outputs.flutter == 'true' && matrix.os == 'ubuntu-latest'
         working-directory: apps/flutter
         run: flutter test --no-pub checks
+      - name: macOS APNs provisioning and cold-launch tests
+        if: steps.scope.outputs.flutter == 'true' && matrix.os == 'macos-15'
+        run: python3 apps/flutter/checks/macos_push_test.py
       # The Linux bundle, for the 24 h curve on the test machine (built here,
       # never there: apps/flutter/scripts/longcurve).
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -912,10 +915,10 @@ jobs:
           fi
           { echo '```'; cat "$RUNNER_TEMP/flutter-out/results.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
       # The macOS packaging (#401 step 5, scripts/package-macos.sh), as the
-      # native release's: the Swift push agent, its client framework, the
-      # LaunchAgent and the service helpers in the bundle, inside-out
+      # native release's: Sparkle, the legacy job's migration plist and
+      # the service helpers in the bundle, inside-out
       # signing (ad-hoc here), the DMG, the .pkg and release-meta. The
-      # runner's slice only (arm64), with the client and the helpers in
+      # runner's slice only (arm64), with the helpers in
       # debug: the packaging is what is checked, and debug builds the
       # quickest. Then the shipped app as the .pkg holds it. Nothing uploaded.
       # Only when what it packages beyond the app changed
@@ -928,8 +931,6 @@ jobs:
           PPVPN_APPLE_TARGETS: aarch64-apple-darwin
         run: |
           triple=aarch64-apple-darwin
-          command -v xcodegen >/dev/null || brew install xcodegen
-          apps/macos/scripts/bootstrap.sh
           cargo build --locked -p ppvpn-service --bins --target "$triple"
           mkdir -p build/binaries
           for bin in ppvpn-service ppvpn-service-install ppvpn-service-uninstall; do
@@ -960,7 +961,7 @@ jobs:
             < <(security list-keychains -d user)
           security list-keychains -d user -s "${keychains[@]}"
           PPVPN_CODESIGN_IDENTITY="PPVPN CI Signing" \
-            SKIP_BOOTSTRAP=1 apps/flutter/scripts/package-macos.sh "${{ steps.build.outputs.bundle }}" arm64
+            apps/flutter/scripts/package-macos.sh "${{ steps.build.outputs.bundle }}" arm64
           ls -l dist/macos
           python3 - dist/macos/release-meta-macos-arm64.json <<'PY'
           import hashlib, json, os, sys
