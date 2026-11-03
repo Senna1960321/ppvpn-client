@@ -99,9 +99,11 @@ class _MessagesPageState extends State<MessagesPage> {
   Future<void> _openRequested() async {
     final request = messages.takeOpen();
     if (request == null) return;
+    final account = messages.accountGeneration;
+    final sequence = messages.openRequests.value;
     final id = request.messageId;
     final index = id == null ? null : await messages.locate(id);
-    if (!mounted) return;
+    if (!mounted || account != messages.accountGeneration || sequence != messages.openRequests.value) return;
     if (index != null) {
       _show(index);
     } else {

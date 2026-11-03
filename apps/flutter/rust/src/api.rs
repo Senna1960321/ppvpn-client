@@ -323,6 +323,13 @@ pub fn set_push_token(token: String, bundle_id: Option<String>) -> Result<(), St
     Ok(())
 }
 
+/// Phones: poll the unread badge only while the app is in the foreground.
+#[frb(sync)]
+pub fn set_notification_foreground(foreground: bool) -> Result<(), String> {
+    bridge::get()?.client.set_notification_foreground(foreground);
+    Ok(())
+}
+
 #[frb(sync)]
 pub fn cancel_sign_in() -> Result<(), String> {
     bridge::get()?.client.auth_cancel();
