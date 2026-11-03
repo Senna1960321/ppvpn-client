@@ -134,6 +134,9 @@ cc=linux/runner/my_application.cc
 # the service, login items and the push agent know the app by.
 case $os in
   macos)
+    # The generated Xcode target already compiles AppDelegate.swift. Append
+    # the maintained native mailbox without modifying its project file.
+    cat runner/macos/PushInbox.swift >> macos/Runner/AppDelegate.swift
     # PPVPN.app, as apps/macos/project.yml (target PPVPN).
     f=macos/Runner/Configs/AppInfo.xcconfig
     replace "$f" '^PRODUCT_NAME = .*' 'PRODUCT_NAME = PPVPN'

@@ -72,7 +72,8 @@ while IFS= read -r f; do
   case $f in
     *.md) ;;
     Cargo.toml | Cargo.lock | rust-toolchain.toml | .github/actions/* | .github/workflows/ci.yml | \
-    apps/macos/* | apps/flutter/scripts/* | apps/flutter/runner/macos/* | apps/flutter/pubspec.* | \
+    apps/macos/* | apps/flutter/scripts/* | apps/flutter/packaging/macos/* | \
+    apps/flutter/runner/macos/* | apps/flutter/pubspec.* | \
     crates/desktop/* | crates/service/* | tools/desktop/*) macpkg=true ;;
   esac
   case $f in

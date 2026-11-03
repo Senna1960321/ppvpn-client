@@ -617,8 +617,11 @@ pub struct Client {
     cores: tokio::sync::Mutex<cores::CoreSync>,
     /// Set by `shutdown`; no core is started afterwards.
     shut_down: AtomicBool,
-    /// Mobile hosts pause the unread poll while their UI is in the background.
+    /// Official-push hosts pause the unread poll while their UI is in the background.
     notification_foreground: AtomicBool,
+    /// Serialises device registration and the macOS legacy-device migration.
+    device_registration: tokio::sync::Mutex<()>,
+    macos_push_generation: std::sync::atomic::AtomicU64,
     /// Background re-read of a credential store that failed at launch.
     credential_retry: session::CredentialRetry,
 }
@@ -1013,6 +1016,9 @@ impl Client {
             .expect("tokio runtime");
         testmode::log_startup(&config.api_base);
         storage::migrate(&config.data_dir);
+        if config.platform == "macos" {
+            device::stage_legacy_macos_device(&config.data_dir);
+        }
         let auth = auth::client_auth(
             Arc::new(api::client_api(&config.api_base)),
             platform.clone(),
@@ -1064,6 +1070,8 @@ impl Client {
                 cores: tokio::sync::Mutex::new(cores::CoreSync::default()),
                 shut_down: AtomicBool::new(false),
                 notification_foreground: AtomicBool::new(true),
+                device_registration: tokio::sync::Mutex::new(()),
+                macos_push_generation: std::sync::atomic::AtomicU64::new(0),
                 credential_retry: session::CredentialRetry::default(),
             }
         });

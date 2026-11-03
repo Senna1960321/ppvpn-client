@@ -1,6 +1,6 @@
 //! Push registration, on [`ppvpn_account::device`].
 //!
-//! Phones (#539) register the APNs or FCM token the host hands over with
+//! iOS, macOS and Android (#539) register the APNs or FCM token the host hands over with
 //! [`Client::set_push_token`]. It is device-wide, so it is kept in
 //! `<data_dir>/push-token.json` across sign-outs; the device is registered
 //! on sign-in, on every launch and whenever the token changes, and
@@ -34,6 +34,32 @@ use crate::Client;
 pub(crate) const AGENT_FILE: &str = "push-agent.json";
 pub(crate) const AGENT_CURSOR_FILE: &str = "push-agent-cursor.json";
 pub(crate) const PUSH_TOKEN_FILE: &str = "push-token.json";
+const LEGACY_MACOS_DEVICE_FILE: &str = "legacy-macos-push.json";
+
+#[derive(Serialize, Deserialize)]
+struct LegacyMacosDevice {
+    api_base: String,
+    device_id: u64,
+}
+
+/// Stop the old agent reading credentials before restoring the session. Keep
+/// only its device id for authenticated deletion, including across an offline
+/// launch. The installation id and the user's sign-in are left in place.
+pub(crate) fn stage_legacy_macos_device(data_dir: &str) {
+    let Some(agent) = read_agent_file(data_dir) else {
+        return;
+    };
+    let pending = LegacyMacosDevice {
+        api_base: agent.api_base,
+        device_id: agent.device_id,
+    };
+    let path = Path::new(data_dir).join(LEGACY_MACOS_DEVICE_FILE);
+    if let Err(error) = write_private(&path, &serde_json::to_vec(&pending).unwrap_or_default()) {
+        tracing::warn!("push migration: cannot save the legacy device: {error}");
+        return;
+    }
+    remove_agent_files(data_dir);
+}
 
 /// The OS push token (APNs, FCM) the host handed over.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -99,14 +125,14 @@ fn needs_new_token(error: &ClientError) -> bool {
 }
 
 impl Client {
-    /// Phones: the APNs device token (iOS) or FCM registration token
+    /// The APNs device token (iOS/macOS) or FCM registration token
     /// (Android) the OS gave the app, and the app's bundle id / package name
     /// when known. Call it whenever the OS hands one over (every launch, and
     /// on rotation). While signed in the device is registered with it; a
     /// replaced token is unregistered first. Ignored on other platforms.
     pub fn set_push_token(&self, token: String, bundle_id: Option<String>) {
         if !official_push(&self.config.platform) {
-            tracing::warn!("push registration: OS push tokens are for the phones only");
+            tracing::warn!("push registration: this platform does not use OS push tokens");
             return;
         }
         let token = token.trim().to_string();
@@ -117,6 +143,10 @@ impl Client {
             token,
             bundle_id: bundle_id.filter(|id| !id.trim().is_empty()),
         };
+        if self.config.platform == "macos" {
+            self.set_macos_push_token(new);
+            return;
+        }
         let old = read_os_token(&self.config.data_dir);
         if old.as_ref() != Some(&new) {
             let raw = serde_json::to_vec(&new).unwrap_or_default();
@@ -150,14 +180,110 @@ impl Client {
         });
     }
 
+    /// Keep macOS token persistence, replacement and logout in the same
+    /// ordering as backend registration. A callback queued before logout
+    /// may save the device-wide token, but cannot register a signed-out user.
+    fn set_macos_push_token(&self, new: OsPushToken) {
+        let generation = self
+            .macos_push_generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        let weak = self.this.clone();
+        self.runtime.spawn(async move {
+            let Some(client) = ClientRef::upgrade(&weak) else {
+                return;
+            };
+            let _registration = client.device_registration.lock().await;
+            if client
+                .macos_push_generation
+                .load(std::sync::atomic::Ordering::SeqCst)
+                != generation
+            {
+                return;
+            }
+            let old = read_os_token(&client.config.data_dir);
+            let changed = old.as_ref() != Some(&new);
+            if changed {
+                let path = Path::new(&client.config.data_dir).join(PUSH_TOKEN_FILE);
+                if let Err(error) =
+                    write_private(&path, &serde_json::to_vec(&new).unwrap_or_default())
+                {
+                    tracing::warn!("push registration: {error}");
+                    return;
+                }
+            }
+            let Ok(session) = client.current_session() else {
+                return;
+            };
+            if changed {
+                client.set_device_state(session, DeviceState::Pending);
+                if let Some(old) = old.filter(|old| old.token != new.token) {
+                    client.unregister_os_token(session, &old.token).await;
+                }
+            }
+            client.ensure_device_registered_locked(session).await;
+        });
+    }
+
     /// Registers when the session wants it; called by the refresh loop.
     pub(crate) async fn ensure_device_registered(&self, session: u64) {
+        let _registration = self.device_registration.lock().await;
+        self.ensure_device_registered_locked(session).await;
+    }
+
+    async fn ensure_device_registered_locked(&self, session: u64) {
+        if !self.session_is(session) {
+            return;
+        }
+        if self.config.platform == "macos" {
+            self.retire_legacy_macos_device(session).await;
+        }
         let wanted = {
             let state = self.session_state();
             state.is_session(session) && state.device == DeviceState::Pending
         };
         if wanted {
             self.register_device(session).await;
+        }
+    }
+
+    async fn retire_legacy_macos_device(&self, session: u64) {
+        let path = Path::new(&self.config.data_dir).join(LEGACY_MACOS_DEVICE_FILE);
+        let Some(legacy) = std::fs::read(&path)
+            .ok()
+            .and_then(|raw| serde_json::from_slice::<LegacyMacosDevice>(&raw).ok())
+        else {
+            return;
+        };
+        // Never delete a similarly numbered device on another backend after
+        // a developer changes the API override.
+        let same_backend =
+            legacy.api_base.trim_end_matches('/') == self.config.api_base.trim_end_matches('/');
+        let retired = if same_backend {
+            matches!(
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    self.bearer(
+                        session,
+                        |token| async move {
+                            self.auth
+                                .api()
+                                .delete_device(&token, legacy.device_id)
+                                .await
+                        },
+                        ApiError::into_client_error,
+                    )
+                )
+                .await,
+                Ok(Ok(()))
+            )
+        } else {
+            true
+        };
+        if retired && self.session_is(session) {
+            if let Err(error) = std::fs::remove_file(path) {
+                tracing::warn!("push migration: cannot clear the legacy device: {error}");
+            }
         }
     }
 
@@ -270,7 +396,8 @@ impl Client {
             let Ok(session) = self.current_session() else {
                 return;
             };
-            let registered = self.session_state().device == DeviceState::Registered;
+            let registered = self.config.platform == "macos"
+                || self.session_state().device == DeviceState::Registered;
             if let (true, Some(os_token)) = (registered, read_os_token(&self.config.data_dir)) {
                 self.unregister_os_token(session, &os_token.token).await;
             }
@@ -323,6 +450,10 @@ impl Client {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "device/macos_tests.rs"]
+mod macos_tests;
 
 #[cfg(test)]
 mod tests {

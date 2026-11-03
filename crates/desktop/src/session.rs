@@ -881,8 +881,13 @@ impl Client {
         tracing::info!("logout");
         self.auth.cancel();
         // While the session can still authenticate.
-        self.unregister_device().await;
-        self.drop_session(None, None);
+        {
+            // A pending APNs registration must finish before unregister,
+            // and no queued registration can run before session invalidation.
+            let _registration = self.device_registration.lock().await;
+            self.unregister_device().await;
+            self.drop_session(None, None);
+        }
         self.stop_cores().await;
         let result = {
             let _guard = self.auth.lock().await;

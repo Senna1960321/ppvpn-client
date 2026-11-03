@@ -24,6 +24,9 @@
 #   MACOS_SIGNING_P12_BASE64   the Developer ID Application certificate + key of
 #   MACOS_SIGNING_P12_PASSWORD   our team (crates/service/src/macos_team_id, #471);
 #                              without them builds are ad-hoc
+#   MACOS_APNS_PROFILE_BASE64 Developer ID provisioning profile for
+#                              com.peakpassvpn.ppvpn.desktop with production
+#                              APNs, required with a Developer ID signature
 #   MACOS_INSTALLER_P12_BASE64 the Developer ID Installer certificate + key: signs
 #   MACOS_INSTALLER_P12_PASSWORD the pkg
 #   ASC_KEY_ID, ASC_ISSUER_ID, App Store Connect API key (contents of the .p8):
@@ -32,11 +35,8 @@
 #   what it has, and builds ad hoc (with a warning) when the certificate is
 #   not our Developer ID Application (the dev environment's old one).
 #   MACOS_STAGING_DIR          output directory (default staging/macos-native)
-#   PPVPN_PREBUILT=1           the Rust is built already, by other jobs (release.yml):
-#                              the service helpers in build/binaries
-#                              (tools/desktop/build-service.sh macos) and
-#                              apps/macos/PPVPNClient (crates/desktop/scripts/build-apple.sh);
-#                              only the Xcode project is generated here
+#   PPVPN_PREBUILT=1           the service helpers are already in build/binaries
+#                              (tools/desktop/build-service.sh macos)
 set -euo pipefail
 
 : "${CI_PROJECT_DIR:?CI_PROJECT_DIR is required}"
@@ -51,13 +51,9 @@ for arch in $MACOS_ARCHS; do
 done
 
 cd "$CI_PROJECT_DIR"
-command -v xcodegen >/dev/null || brew install xcodegen
-if [[ "${PPVPN_PREBUILT:-}" == 1 ]]; then
-  (cd apps/macos && xcodegen generate)
-else
+if [[ "${PPVPN_PREBUILT:-}" != 1 ]]; then
   rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
   rustup default "$RUST_TOOLCHAIN"
-  # ppvpn-client's build-apple.sh builds both slices; each package is thinned.
   rustup target add aarch64-apple-darwin x86_64-apple-darwin
   # Universal service helpers; package-app.sh thins them per build.
   bash tools/desktop/build-service.sh macos
@@ -95,7 +91,7 @@ trap cleanup EXIT
 # A temporary keychain holds the identities for this build only.
 team="$(tr -d '[:space:]' < crates/service/src/macos_team_id)"
 if [[ "${PPVPN_RELEASE_CHANNEL:-}" == stable ]]; then
-  for name in MACOS_SIGNING_P12_BASE64 MACOS_INSTALLER_P12_BASE64 ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_P8; do
+  for name in MACOS_SIGNING_P12_BASE64 MACOS_INSTALLER_P12_BASE64 MACOS_APNS_PROFILE_BASE64 ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_P8; do
     [[ -n "${!name:-}" ]] || { echo "a stable build must be signed and notarized: $name is not set" >&2; exit 5; }
   done
 fi
@@ -167,6 +163,9 @@ if [[ "$signed" == 1 ]]; then
   security list-keychains -d user -s "$keychain" ${original_keychains[@]+"${original_keychains[@]}"}
   export PPVPN_CODESIGN_IDENTITY
   export PPVPN_CODESIGN_TEAM="$team"
+  : "${MACOS_APNS_PROFILE_BASE64:?Developer ID builds require MACOS_APNS_PROFILE_BASE64 for APNs}"
+  (umask 077 && printf '%s' "$MACOS_APNS_PROFILE_BASE64" | base64 --decode > "$key_dir/apns.provisionprofile")
+  export PPVPN_MACOS_APNS_PROFILE="$key_dir/apns.provisionprofile"
   if [[ -n "${ASC_KEY_P8:-}" ]]; then
     : "${ASC_KEY_ID:?ASC_KEY_ID is required with ASC_KEY_P8}"
     : "${ASC_ISSUER_ID:?ASC_ISSUER_ID is required with ASC_KEY_P8}"
@@ -194,15 +193,11 @@ staging_dir="${MACOS_STAGING_DIR:-$CI_PROJECT_DIR/staging/macos-native}"
 rm -rf "$staging_dir"
 mkdir -p "$staging_dir"
 
-bootstrap=0
-[[ "${PPVPN_PREBUILT:-}" == 1 ]] && bootstrap=1
 for arch in $MACOS_ARCHS; do
   platform=macos-arm64
   [[ "$arch" == x86_64 ]] && platform=macos-x64
-  # The client package is built once (universal) and reused.
-  SKIP_BOOTSTRAP=$bootstrap apps/flutter/scripts/package-macos.sh "$PPVPN_FLUTTER_BUNDLE" "$arch"
+  apps/flutter/scripts/package-macos.sh "$PPVPN_FLUTTER_BUNDLE" "$arch"
   app="apps/flutter/build/macos-package-$arch/PPVPN.app"
-  bootstrap=1
 
   expected_signature='Signature=adhoc'
   [[ -n "${PPVPN_CODESIGN_IDENTITY:-}" ]] && expected_signature="Authority=$PPVPN_CODESIGN_IDENTITY"

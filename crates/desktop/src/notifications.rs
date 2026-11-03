@@ -110,9 +110,9 @@ fn is_forbidden(error: &ClientError) -> bool {
 
 #[uniffi::export]
 impl Client {
-    /// Phones only: stop background unread polling and refresh on resume.
+    /// Official-push hosts: stop background unread polling and refresh on resume.
     pub fn set_notification_foreground(&self, foreground: bool) {
-        if !matches!(self.config.platform.as_str(), "ios" | "android") {
+        if !ppvpn_account::device::official_push(&self.config.platform) {
             return;
         }
         {
@@ -326,7 +326,7 @@ mod tests {
 
     #[test]
     fn phone_badge_poll_stops_in_background_and_refreshes_on_resume() {
-        for platform in ["ios", "android"] {
+        for platform in ["ios", "android", "macos"] {
             let backend = Backend::new();
             *backend.unread.lock().unwrap() = 3;
             let base = serve(backend.clone());
@@ -362,16 +362,18 @@ mod tests {
 
     #[test]
     fn desktop_badge_poll_does_not_follow_mobile_lifecycle() {
-        let backend = Backend::new();
-        let base = serve(backend.clone());
-        let dir = temp_dir("ppvpn-desktop-badge-test");
-        let client = client(&base, &dir);
-        wait_until(|| matches!(client.snapshot().auth, AuthState::SignedIn));
-        client.set_notification_foreground(false);
-        *backend.unread.lock().unwrap() = 9;
-        wait_until(|| client.snapshot().unread_notifications == 9);
-        client.shutdown();
-        std::fs::remove_dir_all(&dir).ok();
+        for platform in ["windows", "linux"] {
+            let backend = Backend::new();
+            let base = serve(backend.clone());
+            let dir = temp_dir("ppvpn-desktop-badge-test");
+            let client = client_for_platform(&base, &dir, platform);
+            wait_until(|| matches!(client.snapshot().auth, AuthState::SignedIn));
+            client.set_notification_foreground(false);
+            *backend.unread.lock().unwrap() = 9;
+            wait_until(|| client.snapshot().unread_notifications == 9);
+            client.shutdown();
+            std::fs::remove_dir_all(&dir).ok();
+        }
     }
 
     #[test]

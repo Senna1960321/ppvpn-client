@@ -48,8 +48,8 @@ pub struct DeviceRegistrationRequest {
     pub timezone: String,
 }
 
-/// `ios` / `android` on the phones (APNs, FCM), `desktop-macos` /
-/// `desktop-windows` / `desktop-linux` (the self-hosted channel) elsewhere.
+/// `ios` / `macos` / `android` for APNs / FCM; Windows and Linux use
+/// the `desktop-*` self-hosted channel.
 pub fn push_platform(platform: &str) -> String {
     if official_push(platform) {
         platform.to_string()
@@ -59,10 +59,9 @@ pub fn push_platform(platform: &str) -> String {
 }
 
 /// The platform registers an OS push token (APNs, FCM) rather than an
-/// installation id. macOS stays on the self-hosted channel until it moves
-/// to APNs.
+/// installation id.
 pub fn official_push(platform: &str) -> bool {
-    matches!(platform, "ios" | "android")
+    matches!(platform, "ios" | "macos" | "android")
 }
 
 #[derive(Serialize, Deserialize)]
@@ -173,8 +172,10 @@ mod tests {
         assert_eq!(push_platform("windows"), "desktop-windows");
         assert_eq!(push_platform("ios"), "ios");
         assert_eq!(push_platform("android"), "android");
+        assert_eq!(push_platform("macos"), "macos");
+        assert_eq!(push_platform("linux"), "desktop-linux");
         let body = serde_json::to_value(DeviceRegistrationRequest {
-            platform: push_platform("macos"),
+            platform: push_platform("windows"),
             installation_id: Some("id".into()),
             token: None,
             bundle_id: None,
@@ -186,7 +187,7 @@ mod tests {
         assert_eq!(
             body,
             serde_json::json!({
-                "platform": "desktop-macos",
+                "platform": "desktop-windows",
                 "installation_id": "id",
                 "app_version": "1.2.3",
                 "locale": "zh-CN",

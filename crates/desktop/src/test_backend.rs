@@ -32,6 +32,11 @@ pub(crate) struct Backend {
     pub(crate) register_status: Mutex<Option<&'static str>>,
     /// Bodies of `POST /devices/register` and `/devices/unregister`.
     pub(crate) device_bodies: Mutex<Vec<Value>>,
+    /// Pause one registration for a token, after recording its request body.
+    pub(crate) register_gates: Mutex<std::collections::HashMap<String, Arc<std::sync::Barrier>>>,
+    /// Exercise retrying legacy-device retirement after a backend failure.
+    pub(crate) delete_device_status: Mutex<Option<&'static str>>,
+    pub(crate) delete_device_delay: Mutex<Option<Duration>>,
     /// Request heads (lower-cased) of `GET /api/v1/health`.
     pub(crate) health_heads: Mutex<Vec<String>>,
     /// Body of `GET /api/v1/me/proxy-profile`; none answers 404
@@ -180,6 +185,14 @@ impl Backend {
                 }
                 let request: Value = serde_json::from_str(body).unwrap_or_default();
                 self.device_bodies.lock().unwrap().push(request.clone());
+                let gate = self
+                    .register_gates
+                    .lock()
+                    .unwrap()
+                    .remove(request["token"].as_str().unwrap_or_default());
+                if let Some(gate) = gate {
+                    gate.wait();
+                }
                 let desktop = request["platform"]
                     .as_str()
                     .is_some_and(|platform| platform.starts_with("desktop-"));
@@ -208,7 +221,16 @@ impl Backend {
                 self.device_bodies.lock().unwrap().push(request);
                 ("200 OK", r#"{"message":"device unregistered"}"#.into())
             }
-            ("DELETE", "/api/v1/devices/42") => ("204 No Content", String::new()),
+            ("DELETE", "/api/v1/devices/42") => {
+                let delay = *self.delete_device_delay.lock().unwrap();
+                if let Some(delay) = delay {
+                    std::thread::sleep(delay);
+                }
+                match *self.delete_device_status.lock().unwrap() {
+                    Some(status) => (status, r#"{"code":"DEVICE_DELETE_FAILED"}"#.into()),
+                    None => ("204 No Content", String::new()),
+                }
+            }
             ("GET", "/api/v1/push/pull") => {
                 let after = param("after").unwrap_or(0);
                 let wait = param("wait").unwrap_or(25);
