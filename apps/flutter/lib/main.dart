@@ -22,6 +22,7 @@ import 'app_state.dart';
 import 'bench.dart';
 import 'e2e.dart';
 import 'mobile.dart';
+import 'mobile_push.dart';
 import 'phone/phone.dart';
 import 'src/rust/api.dart' as rust;
 import 'sample.dart';
@@ -91,6 +92,21 @@ Future<void> main() async {
   // manage, tray or updater (#448).
   if (mobile) {
     runApp(PrototypeApp(app: app));
+    if (samplePage == null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        final push = MobilePush(
+          onToken: (token, bundleId) => rust.setPushToken(token: token, bundleId: bundleId),
+          onOpen: app.openMobileMessage,
+          onForeground: (foreground) => rust.setNotificationForeground(foreground: foreground),
+        );
+        unawaited(push.start());
+        void signedIn() {
+          if (app.snapshot.value.auth == rust.UiAuth.signedIn) unawaited(push.requestPermission());
+        }
+        app.snapshot.addListener(signedIn);
+        signedIn();
+      });
+    }
     return;
   }
 

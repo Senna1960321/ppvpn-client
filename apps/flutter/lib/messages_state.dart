@@ -60,7 +60,7 @@ class MessagesView {
 
 /// What a notification click opens: inbox message [messageId], else (or
 /// when the inbox does not have it) the push itself, read-only.
-typedef OpenRequest = ({int? messageId, rust.UiMessage push});
+typedef OpenRequest = ({int? messageId, rust.UiMessage? push});
 
 class MessagesState {
   MessagesState({required this.fixed, required this.onError});
@@ -84,6 +84,10 @@ class MessagesState {
   /// Bumped by [reload]: answers to an older load are dropped.
   int _generation = 0;
 
+  /// Changes when the signed-in account changes, including sign-out.
+  int get accountGeneration => _accountGeneration;
+  int _accountGeneration = 0;
+
   /// The failed load was a further page (retry loads it again).
   bool _failedMore = false;
 
@@ -102,6 +106,20 @@ class MessagesState {
     openRequests.value++;
   }
 
+  /// Forget the old account, including responses already in flight.
+  void clear() {
+    _accountGeneration++;
+    _generation++;
+    _pages = 0;
+    _failedMore = false;
+    _reloading = null;
+    _loadingMore = null;
+    _openRequest = null;
+    view.value = const MessagesView();
+    // Clear any detail page's local selection as well as the shared list.
+    requestOpen((messageId: null, push: null));
+  }
+
   /// The latest request, once.
   OpenRequest? takeOpen() {
     final request = _openRequest;
@@ -114,13 +132,16 @@ class MessagesState {
   /// Null when it is not there or a load fails.
   Future<int?> locate(int id) async {
     if (fixed) return null;
+    final account = _accountGeneration;
     final reloading = _reloading;
     await (view.value.loading && reloading != null ? reloading : reload());
     for (var pages = 1; ; pages++) {
+      if (account != _accountGeneration) return null;
       final current = view.value;
+      if (current.failed) return null;
       final index = current.items.indexWhere((message) => message.id == id);
       if (index >= 0) return index;
-      if (current.failed || !current.hasMore || pages >= searchPages) return null;
+      if (!current.hasMore || pages >= searchPages) return null;
       await loadMore();
     }
   }
@@ -192,6 +213,7 @@ class MessagesState {
 
   Future<void> setRead(rust.UiMessage message, bool read) async {
     if (message.read == read) return;
+    final account = _accountGeneration;
     _replace(message.id, read);
     if (fixed) return;
     try {
@@ -201,18 +223,21 @@ class MessagesState {
         await rust.markNotificationUnread(id: message.id);
       }
     } catch (error) {
+      if (account != _accountGeneration) return;
       _replace(message.id, !read);
       onError('$error');
     }
   }
 
   Future<void> markAllRead() async {
+    final account = _accountGeneration;
     final before = view.value.items;
     view.value = view.value.copyWith(items: [for (final message in before) _withRead(message, true)]);
     if (fixed) return;
     try {
       await rust.markAllNotificationsRead();
     } catch (error) {
+      if (account != _accountGeneration) return;
       view.value = view.value.copyWith(items: before);
       onError('$error');
     }

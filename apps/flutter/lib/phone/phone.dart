@@ -432,7 +432,9 @@ class PhoneBell extends StatelessWidget {
 /// goes back with a swipe from the screen's left edge (#535). Elsewhere it
 /// slides in from the end over [Tokens.motionPage]. Routes sit beside the
 /// app's home, so the page gets forui's theme and the body text style here.
-Future<T?> pushPhonePage<T>(BuildContext context, Widget page) {
+Future<T?> pushPhonePage<T>(BuildContext context, Widget page) => Navigator.of(context).push<T>(_phoneRoute<T>(context, page));
+
+PageRoute<T> _phoneRoute<T>(BuildContext context, Widget page) {
   Widget themed(BuildContext context) {
     final t = Tokens.of(context);
     return FTheme(
@@ -441,18 +443,16 @@ Future<T?> pushPhonePage<T>(BuildContext context, Widget page) {
     );
   }
 
-  if (Platform.isIOS) return Navigator.of(context).push<T>(CupertinoPageRoute<T>(builder: themed));
-  return Navigator.of(context).push<T>(
-    PageRouteBuilder<T>(
-      transitionDuration: Tokens.motion(context, Tokens.motionPage),
-      reverseTransitionDuration: Tokens.motion(context, Tokens.motionFast),
-      pageBuilder: (context, _, _) => themed(context),
-      transitionsBuilder: (context, animation, _, child) => SlideTransition(
-        position: animation.drive(
-          Tween(begin: const Offset(1, 0), end: Offset.zero).chain(CurveTween(curve: Tokens.motionCurve)),
-        ),
-        child: child,
+  if (Platform.isIOS) return CupertinoPageRoute<T>(builder: themed);
+  return PageRouteBuilder<T>(
+    transitionDuration: Tokens.motion(context, Tokens.motionPage),
+    reverseTransitionDuration: Tokens.motion(context, Tokens.motionFast),
+    pageBuilder: (context, _, _) => themed(context),
+    transitionsBuilder: (context, animation, _, child) => SlideTransition(
+      position: animation.drive(
+        Tween(begin: const Offset(1, 0), end: Offset.zero).chain(CurveTween(curve: Tokens.motionCurve)),
       ),
+      child: child,
     ),
   );
 }
@@ -593,10 +593,23 @@ class PhoneTile extends StatelessWidget {
   }
 }
 
-/// The message center, pushed.
-void openMessages(BuildContext context, AppState app) => unawaited(
-  pushPhonePage<void>(
+/// One message page per navigator: notification taps reuse its listener
+/// instead of opening the detail underneath a second, empty inbox page.
+final _messageRoutes = Expando<PageRoute<void>>();
+
+void openMessages(BuildContext context, AppState app) {
+  final navigator = Navigator.of(context);
+  final existing = _messageRoutes[navigator];
+  if (existing != null && existing.isActive) {
+    navigator.popUntil((route) => identical(route, existing));
+    return;
+  }
+  final route = _phoneRoute<void>(
     context,
     PhoneScaffold(title: S.current('msgCenter'), back: true, child: MessagesPage(app: app)),
-  ),
-);
+  );
+  _messageRoutes[navigator] = route;
+  unawaited(navigator.push<void>(route).then((_) {
+    if (identical(_messageRoutes[navigator], route)) _messageRoutes[navigator] = null;
+  }));
+}

@@ -617,6 +617,8 @@ pub struct Client {
     cores: tokio::sync::Mutex<cores::CoreSync>,
     /// Set by `shutdown`; no core is started afterwards.
     shut_down: AtomicBool,
+    /// Mobile hosts pause the unread poll while their UI is in the background.
+    notification_foreground: AtomicBool,
     /// Background re-read of a credential store that failed at launch.
     credential_retry: session::CredentialRetry,
 }
@@ -1061,6 +1063,7 @@ impl Client {
                 mode_switch: tokio::sync::Mutex::new(()),
                 cores: tokio::sync::Mutex::new(cores::CoreSync::default()),
                 shut_down: AtomicBool::new(false),
+                notification_foreground: AtomicBool::new(true),
                 credential_retry: session::CredentialRetry::default(),
             }
         });
