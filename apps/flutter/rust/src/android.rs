@@ -219,11 +219,15 @@ pub extern "system" fn Java_com_peakpassvpn_ppvpn_NativePushToken_register<'loca
 /// A fresh onNewToken event, not a queued registration retry: the latter
 /// must not override a newer decision that FCM is unavailable.
 #[no_mangle]
-pub extern "system" fn Java_com_peakpassvpn_ppvpn_NativePushToken_recovered(
-    _env: jni::EnvUnowned<'_>,
-    _class: JClass<'_>,
+pub extern "system" fn Java_com_peakpassvpn_ppvpn_NativePushToken_recovered<'local>(
+    mut env: jni::EnvUnowned<'local>,
+    _class: JClass<'local>,
+    files_dir: jni::objects::JString<'local>,
 ) {
-    if let Some(bridge) = crate::bridge::running() {
-        bridge.client.set_android_push_fallback(false);
-    }
+    use jni::errors::ThrowRuntimeExAndDefault;
+    env.with_env(|env| -> jni::errors::Result<()> {
+        crate::bridge::push_recovered(&files_dir.try_to_string(env)?);
+        Ok(())
+    })
+    .resolve::<ThrowRuntimeExAndDefault>();
 }

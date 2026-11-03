@@ -106,6 +106,22 @@ pub(crate) fn start_for_push() -> Result<&'static Bridge, String> {
     start_with_foreground(false)
 }
 
+#[cfg(target_os = "android")]
+pub(crate) fn push_recovered(files_dir: &str) {
+    // Serialize with a worker creating a client from the persisted lease.
+    // This is called only for a fresh FCM token, never for a retry job.
+    let _start = START_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(bridge) = BRIDGE.get() {
+        bridge.client.set_android_push_fallback(false);
+    } else {
+        let _ = std::fs::remove_file(
+            std::path::Path::new(files_dir)
+                .join("data")
+                .join("android-push-fallback"),
+        );
+    }
+}
+
 fn start_with_foreground(foreground: bool) -> Result<&'static Bridge, String> {
     // An Android background token worker and the UI may initialize together.
     // Construct one client so refresh credentials are never raced by two Auths.

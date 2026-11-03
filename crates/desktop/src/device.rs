@@ -122,26 +122,32 @@ impl Client {
             token,
             bundle_id: bundle_id.filter(|id| !id.trim().is_empty()),
         };
-        let old = read_os_token(&self.config.data_dir);
-        if old.as_ref() != Some(&new) {
-            let raw = serde_json::to_vec(&new).unwrap_or_default();
-            let path = Path::new(&self.config.data_dir).join(PUSH_TOKEN_FILE);
-            if let Err(detail) = write_private(&path, &raw) {
-                tracing::warn!("push registration: {detail}");
-                return;
-            }
-        }
-        let Ok(session) = self.current_session() else {
-            return;
-        };
-        let replaced = old.filter(|old| old.token != new.token);
-        let was_registered = {
+        let (session, replaced, was_registered) = {
+            // The file and registration state are one decision. An old
+            // response cannot confirm registration between these updates.
             let mut state = self.session_state();
-            let registered = state.is_session(session) && state.device == DeviceState::Registered;
-            if registered && replaced.is_some() {
+            let old = read_os_token(&self.config.data_dir);
+            let changed = old.as_ref() != Some(&new);
+            if changed {
+                let raw = serde_json::to_vec(&new).unwrap_or_default();
+                let path = Path::new(&self.config.data_dir).join(PUSH_TOKEN_FILE);
+                if let Err(detail) = write_private(&path, &raw) {
+                    tracing::warn!("push registration: {detail}");
+                    return;
+                }
+            }
+            let Some(session) = state.active_session() else {
+                return;
+            };
+            let registered = state.device == DeviceState::Registered;
+            if changed {
                 state.device = DeviceState::Pending;
             }
-            registered
+            (
+                session,
+                old.filter(|old| old.token != new.token),
+                registered,
+            )
         };
         let weak = self.this.clone();
         self.runtime.spawn(async move {
@@ -158,7 +164,8 @@ impl Client {
     /// Whether the current token registration finished; used by Android's
     /// bounded background worker. Signed-out is handled separately by it.
     pub fn push_token_registered(&self, token: &str) -> bool {
-        self.session_state().device == DeviceState::Registered
+        let state = self.session_state();
+        state.device == DeviceState::Registered
             && read_os_token(&self.config.data_dir).is_some_and(|saved| saved.token == token)
     }
 
@@ -240,7 +247,11 @@ impl Client {
                 tracing::info!(
                     "push registration refused ({error}); retrying after the next token refresh"
                 );
-                self.set_device_state(session, DeviceState::AwaitingRefresh);
+                if official {
+                    self.set_os_device_state(session, &body.token, DeviceState::AwaitingRefresh);
+                } else {
+                    self.set_device_state(session, DeviceState::AwaitingRefresh);
+                }
                 return;
             }
             Err(error) => {
@@ -249,11 +260,8 @@ impl Client {
             }
         };
         if official {
-            if self.session_is(session)
-                && read_os_token(&self.config.data_dir).map(|saved| saved.token) == body.token
-            {
+            if self.set_os_device_state(session, &body.token, DeviceState::Registered) {
                 tracing::info!("push registration: device {} registered", registration.id);
-                self.set_device_state(session, DeviceState::Registered);
             }
             return;
         }
@@ -280,6 +288,23 @@ impl Client {
         let mut state = self.session_state();
         if state.is_session(session) {
             state.device = device;
+        }
+    }
+
+    fn set_os_device_state(
+        &self,
+        session: u64,
+        token: &Option<String>,
+        device: DeviceState,
+    ) -> bool {
+        let mut state = self.session_state();
+        if state.is_session(session)
+            && read_os_token(&self.config.data_dir).map(|saved| saved.token) == *token
+        {
+            state.device = device;
+            true
+        } else {
+            false
         }
     }
 
@@ -525,6 +550,58 @@ mod tests {
     }
 
     #[test]
+    fn an_in_flight_old_token_response_cannot_confirm_its_replacement() {
+        let backend = Backend::new();
+        let base = serve(backend.clone());
+        let dir = temp_dir("ppvpn-token-rotation");
+        let client = client_on(&base, &dir, "android");
+        wait_until(|| client.snapshot().auth == crate::AuthState::SignedIn);
+        let first = Arc::new(std::sync::Barrier::new(2));
+        let second = Arc::new(std::sync::Barrier::new(2));
+        backend.register_gates.lock().unwrap().extend([
+            ("old-token".into(), first.clone()),
+            ("new-token".into(), second.clone()),
+        ]);
+        write_private(
+            &Path::new(&dir).join(PUSH_TOKEN_FILE),
+            br#"{"token":"old-token"}"#,
+        )
+        .unwrap();
+        let session = client.current_session().unwrap();
+        let first_client = client.clone();
+        let old_request = client
+            .runtime
+            .spawn(async move { first_client.register_device(session).await });
+        wait_until(|| {
+            backend
+                .device_bodies
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|body| body["token"] == "old-token")
+        });
+        client.set_push_token("new-token".into(), None);
+        wait_until(|| {
+            backend
+                .device_bodies
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|body| body["token"] == "new-token")
+        });
+        first.wait();
+        block_on(old_request).unwrap();
+        assert!(!client.push_token_registered("new-token"));
+        assert_eq!(client.session_state().device, DeviceState::Pending);
+        second.wait();
+        wait_until(|| client.push_token_registered("new-token"));
+        assert!(!client.push_token_registered("old-token"));
+        block_on(client.logout()).unwrap();
+        client.shutdown();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn android_fallback_registers_without_fcm_and_stops_on_headless_recovery() {
         let backend = Backend::new();
         let base = serve(backend.clone());
@@ -559,6 +636,39 @@ mod tests {
             .unwrap()
             .iter()
             .any(|body| *body == serde_json::json!({"token":"fcm-1"})));
+        client.shutdown();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn android_retry_after_process_restart_preserves_the_vpn_fallback_lease() {
+        let backend = Backend::new();
+        let base = serve(backend.clone());
+        let dir = temp_dir("ppvpn-fallback-restart");
+        // State left by the UI process, still being used by :tunnel.
+        let file = AgentFile {
+            api_base: base.clone(),
+            device_id: 42,
+            push_token: PUSH_TOKEN.into(),
+            installation_id: installation_id(&dir).unwrap(),
+        };
+        write_private(&agent_file_path(&dir), &serde_json::to_vec(&file).unwrap()).unwrap();
+        let lease = Path::new(&dir).join(crate::android_push::LEASE_FILE);
+        write_private(&lease, b"enabled").unwrap();
+        // A queued worker recreates the core and retries a cached FCM token;
+        // unlike onNewToken this is not evidence that FCM recovered.
+        let client = client_on(&base, &dir, "android");
+        client.set_notification_foreground(false);
+        client.set_push_token("cached-fcm".into(), None);
+        wait_until(|| client.push_token_registered("cached-fcm"));
+        assert!(lease.exists());
+        assert!(read_agent_file(&dir).is_some());
+        assert!(backend.requests_matching("DELETE").is_empty());
+        assert_eq!(client.session_state().android_push, DeviceState::Registered);
+        client.set_android_push_fallback(false);
+        assert!(!lease.exists());
+        wait_until(|| read_agent_file(&dir).is_none());
+        block_on(client.logout()).unwrap();
         client.shutdown();
         let _ = std::fs::remove_dir_all(dir);
     }

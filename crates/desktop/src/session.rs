@@ -138,6 +138,10 @@ pub(crate) struct SessionState {
 }
 
 impl SessionState {
+    pub(crate) fn active_session(&self) -> Option<u64> {
+        self.signed_in.then_some(self.session)
+    }
+
     /// `session` is the current, signed-in session.
     pub(crate) fn is_session(&self, session: u64) -> bool {
         self.signed_in && self.session == session

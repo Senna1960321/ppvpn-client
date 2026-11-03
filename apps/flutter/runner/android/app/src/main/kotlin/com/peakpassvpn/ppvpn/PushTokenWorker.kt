@@ -37,5 +37,5 @@ class PushTokenWorker @JvmOverloads constructor(context: Context, params: Worker
 object NativePushToken {
     init { System.loadLibrary("ppvpn_flutter") }
     @JvmStatic external fun register(filesDir: String, token: String, bundleId: String): Boolean
-    @JvmStatic external fun recovered()
+    @JvmStatic external fun recovered(filesDir: String)
 }
