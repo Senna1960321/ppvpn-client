@@ -111,6 +111,31 @@ L1 和 L2 只跑一遍（`unit`、`integration`）；`macos`、`windows` 不重�
 | `ppvpn-cli` | `identity`；`--test keystore`（登录钥匙串，`PPVPN_TEST_KEYSTORE=1`） | 不支持 Windows |
 | `ppvpn-client` | `detect`、`service`、`sysproxy` | `detect`、`service`、`sysproxy` |
 
+### macOS APNs 与打包检查
+
+在仓库根运行 `python3 apps/flutter/checks/macos_push_test.py`：profile 的允许/拒绝条件、签名前的
+profile/entitlement 准备、无签名时清理旧 profile，以及 `macpkg` 的路径分类；有 Swift 编译器时还编译并运行
+实际 `PushInbox.swift`，检查冷启动回调、token 轮换、重复点击和 payload 过滤。CI 在 `flutter (macos-15)`
+上执行，runner 自带 Swift。它不使用 Apple 账号、签名私钥或真实 APNs。
+
+Rust 的 `crates/desktop/src/device/macos_tests.rs` 随客户端测试运行，覆盖 macOS 注册、轮换、退出登录顺序和
+旧设备迁移；通知生命周期测试检查后台停止未读轮询、恢复时刷新，以及 Windows/Linux 行为不变。
+macOS 本地运行时用短临时目录，避免测试 Unix socket 超过路径长度限制：
+
+```sh
+TMPDIR=/tmp PPVPN_API_BASE_DEFAULT=https://api.example.test \
+  cargo test --locked -p ppvpn-account -p ppvpn-desktop --lib
+```
+
+Flutter 的 `checks/mobile_push_test.dart`、`checks/messages_push_test.dart` 随
+`cd apps/flutter && flutter test --no-pub checks` 运行，覆盖共享回调和当前账号的消息跳转。
+
+`Package (macOS)` 检查实际 arm64 安装包：Sparkle 独立解析、旧代理/FFI 不在包内、服务程序、签名、DMG、
+展开后的 pkg 和 release-meta。`apps/flutter/packaging/macos/` 的清单、锁文件或 entitlement 改动也会触发它。
+#539 的本地验证已通过生成的 Flutter release 构建及 ad-hoc DMG/pkg 打包和校验，**未启动应用**。
+真实 Developer ID APNs 注册/收取、系统权限交互、通知唤起已退出的应用，以及已安装旧代理的迁移仍需
+[真机 QA](desktop/qa-checklist.md#macos)；这些结果不能由 mailbox 单测或 ad-hoc 签名推断。
+
 ### 缓存
 
 PR 只读缓存，不写；`ci.yml` 里没有任何一步保存缓存（setup-go 的也关了）。缓存在合入 main 时由 `release.yml` 的 `cache-*` job 保存。rust-cache 的键里有工具链、`CARGO*`/`RUST*`/`CC*` 环境变量和所有清单与锁文件的哈希，所以 job 只在两种情况下运行：`Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml` 或 `.cargo/config.toml` 变了（`tools/ci-changes.sh` 的 `lock`），或者 main 上已经没有这个键（被挤掉了）。运行时先只查确切的键，命中就什么都不编；没命中才从零编译并保存。仓库的缓存总共 20 GB，超出时 GitHub 先删最久没用的；总量超过 19 GB 时，缺的键也不重建，免得重建一个又挤掉另一个。

@@ -11,10 +11,10 @@ any release.
 - `rust/`: the bridge crate `ppvpn-flutter` (a workspace member). `api.rs` is
   everything Dart can call; `bridge.rs` holds the one `Client`, its listener
   and the conversions; `hooks.rs` holds the platform hooks; `push_agent.rs`
-  starts the push agent.
+  starts the Windows/Linux push agent.
 - `push-agent/`: `ppvpn-push-agent` (a workspace member), which shows
   backend pushes as notifications while the app is closed, on Windows and
-  Linux (macOS keeps the Swift agent). It replaces the .NET agents and
+  Linux (macOS uses APNs). It replaces the .NET agents and
   reads the app's data directory (`rust/src/dirs.rs`, compiled into both).
 - `lib/theme.dart`: every design token in one place: the unified design
   signed off on #387 (2026-10-20). It covers colours for light and dark,
@@ -43,13 +43,15 @@ any release.
   instance and exits; the running one shows its window. On Linux the lock
   and socket are `instance.lock` and `instance.sock` in the data
   directory. On Windows it is a named pipe, plus the toast's COM activator
-  (`--toast-activated`, registered by the push agent). On macOS the push
-  agent opens `ppvpn://push/<id>`. A click opens the message's link in the
-  browser, or the message center on that message.
+  (`--toast-activated`, registered by the push agent). macOS retains
+  `ppvpn://push/<id>` for legacy links; new APNs taps go through the push
+  channel and open the current account's message center (see below).
 - `runner/<os>/`: our files over the generated runner (`flutter create`).
-  On macOS that is `MainFlutterWindow.swift`, for the `ppvpn://` links and
-  reopens; `scripts/ci-build.sh` also registers the scheme in its
-  Info.plist. The app icons are the native apps' (`AppIcon.appiconset`
+  On macOS, `MainFlutterWindow.swift` handles `ppvpn://` links and reopens;
+  `Runner/AppDelegate.swift` and `PushInbox.swift` receive APNs callbacks
+  before Dart is ready. `scripts/ci-build.sh` registers the URL scheme and
+  appends the mailbox to the generated AppDelegate source. The app icons
+  are the native apps' (`AppIcon.appiconset`
   from `apps/macos`, `app_icon.ico` from `apps/windows`).
 - The native apps' identity (#401 step 5), set by `scripts/ci-build.sh` in
   the generated runner:
@@ -202,39 +204,72 @@ Pinned versions:
 (#401 step 5; #522 removed it), into the same artifacts in `dist/macos`. Into a
 copy of the bundle, at the native app's paths, it puts:
 
-- the Swift push agent (`apps/macos`, target `PPVPNAgent`, built with the
-  app's version) at `Contents/Library/LoginItems/PPVPN Agent.app`;
-- its launchd job at `Contents/Library/LaunchAgents`;
-- the client framework the agent links at `Contents/Frameworks`;
+- the old agent's plist at `Contents/Library/LaunchAgents`, only so
+  `SMAppService` can unregister an existing job; neither `PPVPN Agent.app`
+  nor `PPVPNClientFFI.framework` is bundled;
 - the service helpers in `Contents/MacOS`, where `rust/src/hooks.rs` looks
   for them;
-- Sparkle (resolved by the agent's build, `apps/macos/project.yml`) at
+- Sparkle (resolved independently by `packaging/macos/SparkleArtifacts`,
+  pinned by its `Package.resolved`) at
   `Contents/Frameworks`, and the Info.plist keys the native build set: the appcast (`PPVPN_UPDATE_FEED_URL`,
   else the channel's feed from `PPVPN_UPDATE_SITE` and
   `PPVPN_RELEASE_CHANNEL`) and the EdDSA key (`PPVPN_SPARKLE_PUBLIC_KEY`).
 
 Then `apps/macos/scripts/package-app.sh` does the rest. It thins the bundle
 to the one architecture and signs it inside out with the hardened runtime
-and `packaging/macos/PPVPN.entitlements`. It signs with the fixed certificate the service
-pins when `PPVPN_CODESIGN_IDENTITY` is set, ad-hoc otherwise. It then writes
+and the entitlements prepared from `packaging/macos/PPVPN.entitlements`.
+Developer ID builds set `PPVPN_CODESIGN_IDENTITY` and `PPVPN_CODESIGN_TEAM`
+and must provide `PPVPN_MACOS_APNS_PROFILE` for
+`com.peakpassvpn.ppvpn.desktop`. `scripts/macos-push-profile.py` checks its
+expiry, Developer ID distribution, app ID, team, production APNs entitlement
+and signing certificate, embeds it at `Contents/embedded.provisionprofile`,
+and adds the three required app/team/APNs entitlements before signing.
+Without a team, packaging removes those entitlements and any stale profile,
+sets `PPVPNAPNsEnabled=false`, and signs ad-hoc or with the supplied test
+identity. It then writes
 `PPVPN-<version>-<platform>.dmg` (with the Sparkle signature when
 `SPARKLE_PRIVATE_KEY_FILE` is set), the `.pkg` (id
 `com.peakpassvpn.ppvpn.desktop.pkg`, with the native postinstall, and the
 same signature for the service's silent updates, #548) and
 `release-meta-<platform>.json`.
 
-An installed app keeps the agent registered as the native app does
-(`runner/macos/Runner/MainFlutterWindow.swift`, `PushAgentService`): it
-uses `SMAppService.agent` from `/Applications`, registers again once per
-build, and checks the heartbeat every five minutes, with `launchctl
-kickstart` and a rate-limited re-registration.
+Sparkle resolution uses `swift package --disable-keychain resolve` and a
+scratch directory under `build/macos-package-<arch>/SourcePackages`; it
+does not build the old agent or its generated client. The local package
+directory is named `SparkleArtifacts` to avoid colliding with the remote
+dependency's SwiftPM identity, `sparkle`.
 
-CI (job `flutter`, macOS) packages the arm64 slice ad-hoc with the client
-and the helpers in debug. It checks the bundle, the signatures, the DMG,
-the expanded `.pkg` and release-meta. release.yml's `macos` job builds the
-app universal (`MACOS_ARCHS="arm64 x86_64"`) and packages both
-architectures through `tools/desktop/ci/build-macos-native.sh`
-(`PPVPN_FLUTTER_BUNDLE`), with the release's signing and Sparkle keys.
+CI (job `flutter`, macOS) packages the arm64 slice with a throwaway
+self-signed identity and debug service helpers. It checks the bundle,
+signatures, DMG, expanded `.pkg` and release-meta. release.yml builds and
+packages each requested architecture in its own job chain through
+`tools/desktop/ci/build-macos-native.sh` (`PPVPN_FLUTTER_BUNDLE`), with the
+release's signing and Sparkle keys. The APNs profile secret belongs to the
+protected packaging job; see [release prerequisites](../../docs/release.md#macos-apns-签名与配置).
+
+## macOS push notifications
+
+The macOS runner registers with APNs when packaging enabled it, and asks
+for notification permission after sign-in. Native callbacks retain the
+latest token and a pending tap until Dart starts listening. The shared
+push bridge passes the token and desktop bundle ID to Rust; the backend
+registration uses `platform=macos`, without an `installation_id`. The
+device token is kept in the private `push-token.json` across sign-outs;
+rotation and logout unregister the old token on a best-effort basis.
+
+A tap selects a `message_id` from the signed-in account's inbox. Payload
+text and URLs are not used as trusted message content. An unavailable
+message leaves the inbox open; repeated taps and taps received before
+session restoration are handled. Unread polling pauses with Flutter's
+background lifecycle state and refreshes on return.
+
+At launch, `AppDelegate.swift` attempts to unregister the legacy
+`SMAppService` job. The core removes its saved credentials/cursor after
+saving the old backend/device ID for deletion, retrying that deletion
+after an offline launch. It preserves the user's sign-in and installation
+ID. No replacement agent is registered. Real signed delivery and an
+upgrade from an installed agent still require the
+[manual macOS checks](../../docs/desktop/qa-checklist.md#macos).
 
 ## Windows installer
 
@@ -281,7 +316,7 @@ From the native apps' feeds, as they update (`lib/updates.dart`):
 
 - macOS: Sparkle, which the runner loads from `Contents/Frameworks` when
   `scripts/package-macos.sh` bundled it (`MainFlutterWindow.swift`,
-  `Updater`). It unregisters the push agent before it replaces the app.
+  `Updater`). The retired macOS push agent is no longer part of updates.
 - Windows: WinSparkle (`rust/src/update.rs`) with the feed and key baked
   into the bridge when it is built (`PPVPN_UPDATE_FEED_URL`, else
   `PPVPN_UPDATE_SITE` and `PPVPN_RELEASE_CHANNEL`; `PPVPN_SPARKLE_PUBLIC_KEY`),

@@ -20,7 +20,7 @@ tree pins none, none is given.
 
 | Component | Version | Licence | Upstream |
 |---|---|---|---|
-| Sparkle (in-app updates) | 2.x, 2.6.0 or later (`apps/macos/project.yml`) | MIT; its bundled components carry their own notices, see upstream | https://github.com/sparkle-project/Sparkle |
+| Sparkle (in-app updates) | 2.10.1 (`apps/flutter/packaging/macos/SparkleArtifacts/Package.resolved`) | MIT; its bundled components carry their own notices, see upstream | https://github.com/sparkle-project/Sparkle |
 
 ## Windows
 

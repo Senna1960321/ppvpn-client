@@ -39,10 +39,11 @@ universal 可执行文件；core 打开 utun 设备作为 TUN。系统 DNS 由 c
 DNS 地址（`State:/Network/Service/<id>/DNS`，supplemental，匹配全部域名），停止时撤掉，进程被强杀时
 由系统删除；隧道内的 DNS 劫持与解析也由 core 负责。service 不写系统 DNS，只在启动和卸载时删除旧版本
 service 用 `scutil` 写下、可能残留的 `State:/Network/Service/com.peakpassvpn.ppvpn.tun/DNS`。
-Desktop 不使用 Network Extension 或 System Extension（没有 Developer ID 与 NE entitlement）。
+Desktop 不使用 Network Extension 或 System Extension，也不需要 NE entitlement。发布应用使用 Developer ID
+签名；APNs 使用自己的 production entitlement 和 provisioning profile，见 [发布配置](release.md#macos-apns-签名与配置)。
 
-Desktop 仓库里的 XCFramework 是 `PPVPNClientFFI`（Desktop 自己 crate 的 UniFFI 绑定），不是
-core 的产物。
+保留的 `PPVPNClientFFI` XCFramework 是客户端 crate 的旧 UniFFI 绑定产物，不是 core 的产物；macOS Flutter
+安装包已不再携带它或旧推送代理。应用直接接收 APNs，构建和迁移说明见 [macOS 打包](../apps/flutter/README.md#macos-packaging)。
 
 ### Flow adapter（`PPVPNCore.xcframework`，目前没有宿主使用）
 

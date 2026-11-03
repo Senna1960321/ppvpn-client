@@ -38,10 +38,15 @@ TUN 或路由出问题、机器连不上时能自己恢复；确认还能登录�
 - [ ] 首次安装后增强模式：第一次增强连接要一次管理员密码（安装特权服务），之后连上。
 - [ ] DMG 手动安装：在访达里把应用拖进「应用程序」，放行一次后能正常启动。
 - [ ] 应用内更新（Sparkle）：更新安装后直接打开，不需要再次放行。
-- [ ] Sparkle 更新时推送助手先退出：安装前应用注销 PPVPN Agent（日志 `push agent: unregistered for the update`），
-      系统日志里没有 `Launch Constraint Violation`，也没有新的"PPVPN Agent"崩溃报告；新版启动后几秒内
-      `launchctl print gui/<uid>/com.peakpassvpn.ppvpn.desktop.agent` 显示 running，推送日志里重新出现 `push agent: Running`。
-      从 0.6.1 及更早版本更新时旧版还没有这一步，仍会出现一次上述终止，约 1 分钟后恢复。
+- [ ] APNs 正式包：使用 Developer ID 签名并公证的包，确认 profile 对应桌面 bundle ID 和 production APNs；
+      首次登录申请通知权限，允许/拒绝后都不会每次启动重复询问，系统设置里重新允许后能收到真实推送。
+- [ ] APNs 收取与点击：前台、隐藏窗口、应用已退出三种状态都验收；点击后显示当前账号的消息，冷启动和重复点击
+      不丢跳转；无效或已删除的 `message_id` 留在消息中心，不打开 payload 中的 URL。退出登录或切换账号后不显示旧账号正文。
+- [ ] APNs token 轮换及注销：轮换时先尽力注销旧 token，再注册最新 token；退出登录尽力注销后端 token，但本地私有
+      `push-token.json` 保留供下次登录；后台停止未读数轮询，恢复前台刷新。
+- [ ] 旧代理迁移：从已有、正在运行的 PPVPN Agent 升级，也覆盖用户禁用旧 job 和离线首次启动的情况。
+      新包没有 `PPVPN Agent.app` / `PPVPNClientFFI.framework`；首次启动后旧 job 被注销且不再重启，旧代理凭据和游标移除，
+      用户登录和 installation ID 保留。离线时保留旧设备删除记录，联网登录后再清理，不影响新 APNs 注册。
 - [ ] Sparkle 更新后替换特权服务：从已装过服务的上一版（例如 0.6.0 build 133）用 Sparkle 更新到新版，
       新版的 `crates/service`、`crates/engine-host`、`crates/core` 或 `Cargo.lock` 有改动。更新后服务不会被
       替换，打开应用和标准模式连接也不会。第一次增强模式连接前：弹出管理员密码框；
