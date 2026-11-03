@@ -33,6 +33,7 @@ pub(crate) struct Backend {
     pub(crate) register_status: Mutex<Option<&'static str>>,
     /// Bodies of `POST /devices/register` and `/devices/unregister`.
     pub(crate) device_bodies: Mutex<Vec<Value>>,
+    pub(crate) register_gates: Mutex<std::collections::HashMap<String, Arc<std::sync::Barrier>>>,
     /// Request heads (lower-cased) of `GET /api/v1/health`.
     pub(crate) health_heads: Mutex<Vec<String>>,
     /// Body of `GET /api/v1/me/proxy-profile`; none answers 404
@@ -181,6 +182,14 @@ impl Backend {
                 }
                 let request: Value = serde_json::from_str(body).unwrap_or_default();
                 self.device_bodies.lock().unwrap().push(request.clone());
+                let gate = self
+                    .register_gates
+                    .lock()
+                    .unwrap()
+                    .remove(request["token"].as_str().unwrap_or_default());
+                if let Some(gate) = gate {
+                    gate.wait();
+                }
                 let desktop = request["platform"]
                     .as_str()
                     .is_some_and(|platform| platform.starts_with("desktop-"));

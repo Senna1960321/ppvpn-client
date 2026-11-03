@@ -15,7 +15,7 @@ open class PushMessagingService : FirebaseMessagingService() {
         PushTokenWorker.enqueue(this)
     }
 
-    protected open fun onTokenRecovered() { NativePushToken.recovered() }
+    protected open fun onTokenRecovered() { NativePushToken.recovered(filesDir.path) }
 
     override fun onMessageReceived(message: RemoteMessage) {
         val data = message.data

@@ -1034,6 +1034,13 @@ impl Client {
         };
         let routing = routing::RoutingModeCell::new(snapshot.routing_mode);
         let ingress_pins = ingress::PinsCell::new(ingress::load(&config.data_dir));
+        // A delayed Android token worker may recreate the UI process while
+        // :tunnel is still delivering fallback pushes. Restore that choice
+        // before any session task can register or clean up device files.
+        let android_push_fallback = config.platform == "android"
+            && std::path::Path::new(&config.data_dir)
+                .join(android_push::LEASE_FILE)
+                .is_file();
         let client = Arc::new_cyclic(|this| {
             let (standard, enhanced, compat) = cores::build_cores(
                 &config,
@@ -1067,7 +1074,7 @@ impl Client {
                 cores: tokio::sync::Mutex::new(cores::CoreSync::default()),
                 shut_down: AtomicBool::new(false),
                 notification_foreground: AtomicBool::new(true),
-                android_push_fallback: AtomicBool::new(false),
+                android_push_fallback: AtomicBool::new(android_push_fallback),
                 android_push_lock: tokio::sync::Mutex::new(()),
                 credential_retry: session::CredentialRetry::default(),
             }
