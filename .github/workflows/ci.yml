@@ -869,6 +869,9 @@ jobs:
         env:
           PPVPN_SKIP_ANALYZE: ${{ matrix.os != 'ubuntu-latest' && '1' || '' }}
         run: apps/flutter/scripts/ci-build.sh
+      - name: iOS push host tests
+        if: steps.scope.outputs.flutter == 'true' && matrix.os == 'macos-15'
+        run: python3 apps/flutter/checks/ios_push_test.py
       - name: Mobile push bridge tests
         if: steps.scope.outputs.flutter == 'true' && matrix.os == 'ubuntu-latest'
         working-directory: apps/flutter

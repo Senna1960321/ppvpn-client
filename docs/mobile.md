@@ -77,3 +77,26 @@
   - 退出登录时按令牌注销（`POST /api/v1/devices/unregister`，尽力而为）。令牌属于设备，保存在 UI 进程数据目录的 `push-token.json`（0600），退出登录后保留，下次登录直接再注册。
   - 通知内容是 `title` + `body`，`extra` 里带 `message_id` 和 `deep_link`。展示和点击跳转由原生层处理，点开后按 `message_id` 拉正文。
   - 桌面平台不使用这个调用：Windows、Linux 和目前的 macOS 仍走自建推送代理。
+
+### iOS APNs 宿主（#539）
+
+`apps/flutter/scripts/install-ios-plugin.py` 在生成的 AppDelegate 的 `didFinishLaunching` 返回前安装
+`PPVPNPush` 通知代理；Flutter 隐式引擎创建后再注册 `PPVPNPlugin`，接收 APNs token 并建立方法通道。
+每次启动注册 APNs；首次登录后才申请通知显示权限，已拒绝的权限不反复弹窗。通知在前台可显示 banner，
+点击冷启动应用时，`PushInbox` 暂存点击，等 Dart 初始化客户端及第一帧之后交付。token 更新也通过
+`com.peakpassvpn.ppvpn/push` 交给现有 `set_push_token`，退出登录的注销沿用核心逻辑。
+
+点击按 `message_id` 在当前账号的消息列表中加载正文及正文链接；不直接打开推送载荷提供的 URL。
+找不到消息时打开消息中心，未登录时保留登录页面；已经打开消息中心时复用该页面。
+退出登录或切换账号、团队时清空消息缓存和待打开请求，旧的异步结果不再更新页面。手机未读数轮询随 Flutter 生命周期暂停、恢复，
+不需要后台常驻；桌面轮询保持原有行为。
+
+发布前需在 Apple 开发者账号为 `com.peakpassvpn.ppvpn` 开启 Push Notifications，并更新 App Store
+描述文件，使其含 `aps-environment=production`（Runner.entitlements 的值）。APNs p8、key ID 和 team ID
+只配置在后端，不随客户端发布。没有这项能力的旧描述文件不能用于签署此版本；重新生成后再发布。
+本地开发签名使用对应开发描述文件和 `development` entitlement。
+
+验收：真机分别测试允许／拒绝通知、前台／后台／应用退出后的送达、点击冷启动、token 轮换、退出登录后不再送达；
+模拟器及无签名构建不作为 APNs 真实送达验收。`apps/flutter/checks/` 下的 `mobile_push_test.dart`
+检查方法通道与生命周期，`messages_push_test.dart` 检查重复点击及账号缓存隔离，`ios_push_test.py`
+编译运行原生缓存逻辑并检查启动注入；另有核心通知轮询测试及 CI 的 iOS 编译和启动检查。

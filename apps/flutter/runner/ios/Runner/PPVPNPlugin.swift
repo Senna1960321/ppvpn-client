@@ -26,6 +26,7 @@ import Flutter
 import NetworkExtension
 import SafariServices
 import UIKit
+import UserNotifications
 import os
 
 final class PPVPNPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
@@ -36,10 +37,27 @@ final class PPVPNPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
   private var sink: FlutterEventSink?
   private var observer: NSObjectProtocol?
   private weak var browser: SFSafariViewController?
-
   static func register(with registrar: FlutterPluginRegistrar) {
     let plugin = PPVPNPlugin()
     let messenger = registrar.messenger()
+    registrar.addApplicationDelegate(plugin)
+    let push = FlutterMethodChannel(name: "com.peakpassvpn.ppvpn/push", binaryMessenger: messenger)
+    push.setMethodCallHandler { call, result in
+      switch call.method {
+      case "start":
+        PPVPNPush.shared.inbox.start { method, payload in
+          var arguments = payload
+          if method == "token" { arguments["bundle_id"] = Bundle.main.bundleIdentifier ?? "com.peakpassvpn.ppvpn" }
+          push.invokeMethod(method, arguments: arguments)
+        }
+        UIApplication.shared.registerForRemoteNotifications()
+        result(nil)
+      case "requestPermission":
+        PPVPNPush.shared.requestPermission()
+        result(nil)
+      default: result(FlutterMethodNotImplemented)
+      }
+    }
     #if targetEnvironment(simulator)
       VMServiceAnnouncer.start(registrar)
     #endif
@@ -59,6 +77,14 @@ final class PPVPNPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
       .setMethodCallHandler(plugin.handle)
     FlutterEventChannel(name: "com.peakpassvpn.ppvpn/vpn-state", binaryMessenger: messenger)
       .setStreamHandler(plugin)
+  }
+
+  func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+    PPVPNPush.shared.inbox.receiveToken(deviceToken.map { String(format: "%02x", $0) }.joined())
+  }
+
+  func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
+    NSLog("push: APNs registration failed: %@", error.localizedDescription)
   }
 
   /// The screenshot mode's page and theme (lib/sample.dart) in a simulator
@@ -257,3 +283,43 @@ final class PPVPNPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
     }
   }
 #endif
+
+/// Installed in didFinishLaunching, before Flutter creates its implicit
+/// engine. The singleton retains cold-start taps until Dart calls start.
+final class PPVPNPush: NSObject, UNUserNotificationCenterDelegate {
+  static let shared = PPVPNPush()
+  let inbox = PushInbox()
+
+  static func install() {
+    UNUserNotificationCenter.current().delegate = shared
+  }
+
+  func requestPermission() {
+    let center = UNUserNotificationCenter.current()
+    center.getNotificationSettings { settings in
+      guard settings.authorizationStatus == .notDetermined else { return }
+      center.requestAuthorization(options: [.alert, .badge, .sound]) { _, error in
+        if let error { NSLog("push: notification permission failed: %@", error.localizedDescription) }
+        DispatchQueue.main.async { UIApplication.shared.registerForRemoteNotifications() }
+      }
+    }
+  }
+
+  func userNotificationCenter(
+    _ center: UNUserNotificationCenter, willPresent notification: UNNotification,
+    withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+  ) {
+    completionHandler([.banner, .list, .sound])
+  }
+
+  func userNotificationCenter(
+    _ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
+    withCompletionHandler completionHandler: @escaping () -> Void
+  ) {
+    if response.actionIdentifier == UNNotificationDefaultActionIdentifier {
+      let info = response.notification.request.content.userInfo
+      DispatchQueue.main.async { self.inbox.receiveTap(info) }
+    }
+    completionHandler()
+  }
+}
