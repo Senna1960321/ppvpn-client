@@ -26,6 +26,7 @@ pub(crate) struct Backend {
     /// Push queue: items not yet acked are delivered.
     pub(crate) push_items: Mutex<Vec<Value>>,
     pub(crate) acked: Mutex<Vec<u64>>,
+    pub(crate) ack_delay: Mutex<Option<std::time::Duration>>,
     /// The push token the queue accepts (401 otherwise).
     pub(crate) push_token: Mutex<String>,
     /// Status for `POST /devices/register` (e.g. 403 before the scope).
@@ -234,6 +235,9 @@ impl Backend {
                 }
             }
             ("POST", "/api/v1/push/ack") => {
+                if let Some(delay) = *self.ack_delay.lock().unwrap() {
+                    std::thread::sleep(delay);
+                }
                 let request: Value = serde_json::from_str(body).unwrap_or_default();
                 let ids: Vec<u64> = request["ids"]
                     .as_array()

@@ -4,6 +4,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.net.LinkProperties
 import android.net.Network
@@ -52,6 +53,7 @@ class TunnelService : VpnService() {
     private val worker = Executors.newSingleThreadExecutor()
     private var tun: ParcelFileDescriptor? = null
     private var network: NetworkWatch? = null
+    private var push: PushFallback? = null
 
     private val query = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) = publish()
@@ -70,7 +72,12 @@ class TunnelService : VpnService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         lastStartId = startId
         when (intent?.action) {
-            ACTION_START -> run(::start)
+            ACTION_START -> {
+                val notification = PushNotifications.vpn(this)
+                if (Build.VERSION.SDK_INT >= 34) startForeground(PushNotifications.VPN_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SYSTEM_EXEMPTED)
+                else startForeground(PushNotifications.VPN_ID, notification)
+                run(::start)
+            }
             ACTION_STOP -> stop(startId)
             else -> run { if (state == STATE_OFF) stopSelfResult(startId) }
         }
@@ -88,6 +95,7 @@ class TunnelService : VpnService() {
         worker.shutdown()
         worker.awaitTermination(SHUTDOWN_WAIT_S, TimeUnit.SECONDS)
         set(STATE_OFF)
+        stopForeground(STOP_FOREGROUND_REMOVE)
         super.onDestroy()
     }
 
@@ -115,6 +123,7 @@ class TunnelService : VpnService() {
         if (failure == null) {
             Log.i(TAG, "tunnel started")
             set(STATE_ON)
+            push = PushFallback(this, ::run).also { it.start() }
             return
         }
         Log.e(TAG, "start: $failure")
@@ -175,6 +184,8 @@ class TunnelService : VpnService() {
      * is taken out before it stops.
      */
     private fun shutDown() {
+        push?.close()
+        push = null
         network?.stop()
         network = null
         TunnelHost.stop()

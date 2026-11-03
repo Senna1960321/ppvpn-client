@@ -97,6 +97,7 @@ Future<void> main() async {
         final push = MobilePush(
           onToken: (token, bundleId) => rust.setPushToken(token: token, bundleId: bundleId),
           onOpen: app.openMobileMessage,
+          onFallback: (enabled) => rust.setAndroidPushFallback(enabled: enabled),
           onForeground: (foreground) => rust.setNotificationForeground(foreground: foreground),
         );
         unawaited(push.start());

@@ -9,6 +9,7 @@
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, Weak};
 
+mod android_push;
 mod api;
 mod auth;
 mod compat;
@@ -613,6 +614,8 @@ pub struct Client {
     shut_down: AtomicBool,
     /// Mobile hosts pause the unread poll while their UI is in the background.
     notification_foreground: AtomicBool,
+    android_push_fallback: AtomicBool,
+    android_push_lock: tokio::sync::Mutex<()>,
     /// Background re-read of a credential store that failed at launch.
     credential_retry: session::CredentialRetry,
 }
@@ -1058,6 +1061,8 @@ impl Client {
                 cores: tokio::sync::Mutex::new(cores::CoreSync::default()),
                 shut_down: AtomicBool::new(false),
                 notification_foreground: AtomicBool::new(true),
+                android_push_fallback: AtomicBool::new(false),
+                android_push_lock: tokio::sync::Mutex::new(()),
                 credential_retry: session::CredentialRetry::default(),
             }
         });
