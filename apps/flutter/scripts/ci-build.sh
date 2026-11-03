@@ -228,21 +228,9 @@ if not targets:
     raise SystemExit(f"{path}: no deployment target")
 open(path, "w").write(text)
 
-delegate = "ios/Runner/AppDelegate.swift"
-code = open(delegate).read()
-plugin = open("runner/ios/Runner/PPVPNPlugin.swift").read()
-imports = [line for line in plugin.splitlines() if line.startswith("import ")]
-body = "\n".join(line for line in plugin.splitlines() if not line.startswith("import "))
-code, registered = re.subn(
-    r"^([ \t]*)GeneratedPluginRegistrant\.register\(with: ([^)]+)\)\n",
-    lambda m: m.group(0) + f'{m.group(1)}PPVPNPlugin.register(with: {m.group(2)}.registrar(forPlugin: "PPVPNPlugin")!)\n',
-    code, count=1, flags=re.M)
-if not registered:
-    raise SystemExit(f"{delegate}: no GeneratedPluginRegistrant.register to follow")
-missing = [line for line in imports if line not in code.splitlines()]
-open(delegate, "w").write("\n".join(missing) + "\n" + code + "\n" + body + "\n")
 PY
-    rm ios/Runner/PPVPNPlugin.swift
+    python3 scripts/install-ios-plugin.py ios/Runner/AppDelegate.swift
+    rm ios/Runner/PPVPNPlugin.swift ios/Runner/PushInbox.swift
     plist=ios/Runner/Info.plist
     # The export compliance answer (#470): only the system's and standard
     # encryption, so no question per TestFlight build.
@@ -393,7 +381,7 @@ PY
     [ "${IOS_SDK:-device}" = device ] || { echo "IOS_TEAM_ID signs device builds only" >&2; exit 1; }
     [ "$build" -gt 0 ] || { echo "an App Store build needs PPVPN_BUILD_NUMBER" >&2; exit 1; }
     # Manual signing of the Runner target (its three configurations), with
-    # the entitlements from runner/ios: the system VPN and the App Group.
+    # the entitlements from runner/ios: VPN, App Group and production APNs.
     python3 - <<'PY'
 import json, os
 path = "ios/Runner.xcodeproj/project.pbxproj"
