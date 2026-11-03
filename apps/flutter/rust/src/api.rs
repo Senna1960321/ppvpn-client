@@ -754,6 +754,35 @@ pub async fn silent_update_install(relaunch: bool) -> Result<bool, String> {
     bridge::get()?.run(crate::silent::install(relaunch)).await
 }
 
+/// A package downloaded and saved earlier that this launch may install
+/// (docs/host-integration.md section 16.1): the switch on, newer, not given
+/// up, not tried at a launch before. Reads the file only; before [`start`].
+#[frb(sync)]
+pub fn launch_install_pending() -> bool {
+    crate::silent::launch_install_pending()
+}
+
+/// Installs that package at launch, before [`start`]: hashes the cached
+/// copy again (never downloads), asks a service that supports silent
+/// updates and is not installing, and sends it with `relaunch`; true when
+/// the service accepted it and the app must now exit. With `hidden` (a
+/// launch into the tray) the app it opens again starts in the tray. Each
+/// build is tried at one launch only. Blocks a worker thread for up to the
+/// service's minute; on a runtime of its own, the client's is not there yet.
+pub fn silent_update_install_at_launch(hidden: bool) -> bool {
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            tracing::warn!(%error, "silent update at launch: no runtime");
+            return false;
+        }
+    };
+    runtime.block_on(crate::silent::install_at_launch(hidden))
+}
+
 /// The 「自动更新」 switch; `None` before it was first set.
 #[frb(sync)]
 pub fn auto_update() -> Option<bool> {

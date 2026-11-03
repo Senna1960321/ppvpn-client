@@ -16,7 +16,13 @@
 //! - `user_quit_at_ms`: the user quit while an idle install's request was
 //!   out and the service accepted it: the app it opens again quits at once;
 //! - `later_since_ms`: since when the channel could not be read or the
-//!   package downloaded; after [`LATER_FOR`] the app goes back to the prompt.
+//!   package downloaded; after [`LATER_FOR`] the app goes back to the prompt;
+//! - `ready`: the package last downloaded, for an install at the next
+//!   launch (section 16.1), which hashes the cached copy again and never
+//!   downloads; `launch_tried`: the build last sent at a launch. A launch
+//!   tries a build once: the login item and the service's own launch after
+//!   an install count as launches, and a result that never comes, or one
+//!   that is not counted, would otherwise loop.
 //!
 //! A file that is there but unreadable reads as the switch on and its last
 //! result handled, never as the switch's first launch.
@@ -68,6 +74,10 @@ struct Saved {
     user_quit_at_ms: u64,
     #[serde(default)]
     later_since_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ready: Option<UpdatePackage>,
+    #[serde(default)]
+    launch_tried: u64,
 }
 
 impl Saved {
@@ -101,7 +111,7 @@ enum Loaded {
     Missing,
     /// There, but not readable as the state.
     Unreadable,
-    Read(Saved),
+    Read(Box<Saved>),
 }
 
 fn path() -> Result<PathBuf, String> {
@@ -117,7 +127,7 @@ fn read() -> Loaded {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Loaded::Missing,
         Err(_) => Loaded::Unreadable,
         Ok(bytes) => match serde_json::from_slice(&bytes) {
-            Ok(saved) => Loaded::Read(saved),
+            Ok(saved) => Loaded::Read(Box::new(saved)),
             Err(_) => Loaded::Unreadable,
         },
     }
@@ -125,7 +135,7 @@ fn read() -> Loaded {
 
 fn load() -> Saved {
     match read() {
-        Loaded::Read(saved) => saved,
+        Loaded::Read(saved) => *saved,
         Loaded::Missing => Saved::default(),
         Loaded::Unreadable => {
             tracing::warn!("silent update: state unreadable");
@@ -224,6 +234,9 @@ fn drop_package() {
     *READY.lock().unwrap() = None;
     if let Some(updater) = updater() {
         updater.clear_cache();
+    }
+    if load().ready.is_some() {
+        update(|saved| saved.ready = None);
     }
 }
 
@@ -390,6 +403,7 @@ pub(crate) async fn prepare() -> UiSilentPrepared {
         Ok(path) => {
             tracing::info!(version = %package.version, build = package.build, "silent update ready");
             not_later();
+            update(|saved| saved.ready = Some(package.clone()));
             *READY.lock().unwrap() = Some((path, package));
             UiSilentPrepared::Ready
         }
@@ -410,15 +424,76 @@ pub(crate) async fn prepare() -> UiSilentPrepared {
     }
 }
 
+/// The package saved for an install at launch, when this launch may try
+/// it: the switch on, newer than this build, not given up, not tried at a
+/// launch before.
+fn launch_package(saved: &Saved, this_build: u64) -> Option<UpdatePackage> {
+    let package = saved.ready.clone()?;
+    let fresh = saved.auto_update == Some(true)
+        && this_build > 0
+        && package.build > this_build
+        && !saved.given_up.contains(&package.build)
+        && saved.launch_tried != package.build;
+    fresh.then_some(package)
+}
+
+/// See [`crate::api::launch_install_pending`].
+pub(crate) fn launch_install_pending() -> bool {
+    let saved = match read() {
+        Loaded::Read(saved) => saved,
+        _ => return false,
+    };
+    updater().is_some() && launch_package(&saved, build()).is_some()
+}
+
+/// See [`crate::api::silent_update_install_at_launch`].
+pub(crate) async fn install_at_launch(hidden: bool) -> bool {
+    let Some(updater) = updater() else {
+        return false;
+    };
+    let Loaded::Read(saved) = read() else {
+        return false;
+    };
+    let Some(package) = launch_package(&saved, build()) else {
+        return false;
+    };
+    // An install already under way is installingNow's to show.
+    match updater.service_updates().await {
+        ServiceUpdates::Supported { update: None, .. } => {}
+        _ => return false,
+    }
+    let Some(path) = updater.downloaded(&package).await else {
+        tracing::info!(build = package.build, "silent update: saved package gone");
+        update(|saved| saved.ready = None);
+        return false;
+    };
+    // Before the request: whatever follows, the next launch does not try
+    // this build again.
+    if !update(|saved| saved.launch_tried = package.build) {
+        return false;
+    }
+    tracing::info!(version = %package.version, build = package.build, "silent update at launch");
+    *READY.lock().unwrap() = Some((path, package));
+    send(true, hidden).await
+}
+
 /// See [`crate::api::silent_update_install`].
 pub(crate) async fn install(relaunch: bool) -> bool {
+    // Idle: the app the service opens again starts in the tray.
+    send(relaunch, relaunch).await
+}
+
+/// The ready package to the service; with `hidden` the app it opens again
+/// starts in the tray.
+async fn send(relaunch: bool, hidden: bool) -> bool {
     let Some(updater) = updater() else {
         return false;
     };
     let Some((path, package)) = READY.lock().unwrap().clone() else {
         return false;
     };
-    if relaunch {
+    let hidden = relaunch && hidden;
+    if hidden {
         update(|saved| saved.start_hidden_at_ms = now_ms());
     }
     let accepted = match updater.install(&path, &package, relaunch).await {
@@ -439,7 +514,7 @@ pub(crate) async fn install(relaunch: bool) -> bool {
     };
     if !accepted {
         *READY.lock().unwrap() = None;
-        if relaunch {
+        if hidden {
             clear_start_hidden();
         }
     }
@@ -480,6 +555,50 @@ mod tests {
         assert!(saved.fail(420, "UPDATE_CLIENT_STILL_RUNNING"));
     }
 
+    fn package(build: u64) -> UpdatePackage {
+        UpdatePackage {
+            version: "0.7.6".into(),
+            build,
+            file: "PPVPN-Setup.exe".into(),
+            url: "https://example.com/PPVPN-Setup.exe".into(),
+            length: 30,
+            sha256: "cc".repeat(32),
+            ed_signature: "exe".into(),
+        }
+    }
+
+    #[test]
+    fn a_launch_tries_a_saved_build_once() {
+        let mut saved = Saved {
+            auto_update: Some(true),
+            ready: Some(package(420)),
+            ..Saved::default()
+        };
+        assert_eq!(launch_package(&saved, 412), Some(package(420)));
+        // Installed, or this build without a number.
+        assert_eq!(launch_package(&saved, 420), None);
+        assert_eq!(launch_package(&saved, 0), None);
+        saved.launch_tried = 420;
+        assert_eq!(launch_package(&saved, 412), None);
+        // A newer download is tried again.
+        saved.ready = Some(package(421));
+        assert_eq!(launch_package(&saved, 412), Some(package(421)));
+        saved.given_up.push(421);
+        assert_eq!(launch_package(&saved, 412), None);
+        let off = Saved {
+            auto_update: Some(false),
+            ready: Some(package(420)),
+            ..Saved::default()
+        };
+        assert_eq!(launch_package(&off, 412), None);
+        // Before the switch's first launch: none.
+        let first = Saved {
+            ready: Some(package(420)),
+            ..Saved::default()
+        };
+        assert_eq!(launch_package(&first, 412), None);
+    }
+
     #[test]
     fn the_file_reads_back_and_tolerates_missing_keys() {
         let saved: Saved = serde_json::from_str("{}").unwrap();
@@ -491,6 +610,8 @@ mod tests {
             auto_update: Some(false),
             seen_finished_at_ms: 7,
             start_hidden_at_ms: 9,
+            ready: Some(package(420)),
+            launch_tried: 419,
             ..Saved::default()
         };
         saved.fail(420, "UPDATE_FILE_INVALID");

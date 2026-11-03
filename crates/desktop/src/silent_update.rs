@@ -39,8 +39,9 @@ pub fn platform() -> Option<&'static str> {
     }
 }
 
-/// A newer release's package for this platform.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A newer release's package for this platform; the app keeps the one it
+/// downloaded between launches, to install it at the next one.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct UpdatePackage {
     pub version: String,
     pub build: u64,
@@ -272,6 +273,13 @@ impl SilentUpdater {
             .await
             .map_err(|error| format!("{}: {error}", path.display()))?;
         Ok(path)
+    }
+
+    /// The package in the cache if a copy of its length and SHA-256 is
+    /// there; never downloads (an install at launch).
+    pub async fn downloaded(&self, package: &UpdatePackage) -> Option<PathBuf> {
+        let path = self.cache.join(&package.file);
+        matches(&path, package).await.then_some(path)
     }
 
     async fn fetch(&self, package: &UpdatePackage, partial: &Path) -> Result<(), String> {
@@ -638,6 +646,27 @@ mod tests {
                     last_update: None
                 }
             );
+        }
+
+        #[tokio::test]
+        async fn downloaded_is_only_a_checked_copy_in_the_cache() {
+            let (updater, _) = updater(Ok(VersionInfo::default()), Ok(()));
+            let cache = std::env::temp_dir().join("ppvpn-silent-update-test");
+            std::fs::create_dir_all(&cache).unwrap();
+            let package = UpdatePackage {
+                file: "PPVPN-Setup-downloaded.exe".into(),
+                length: 5,
+                sha256: hex::encode(Sha256::digest(b"setup")),
+                ..package()
+            };
+            let path = cache.join(&package.file);
+            let _ = std::fs::remove_file(&path);
+            assert_eq!(updater.downloaded(&package).await, None);
+            std::fs::write(&path, b"setuq").unwrap();
+            assert_eq!(updater.downloaded(&package).await, None);
+            std::fs::write(&path, b"setup").unwrap();
+            assert_eq!(updater.downloaded(&package).await, Some(path.clone()));
+            let _ = std::fs::remove_file(&path);
         }
 
         #[tokio::test]

@@ -1,4 +1,4 @@
-// The silent update's two notices (#548, updates.dart):
+// The silent update's notices (#548, updates.dart):
 // - UpdatedNotice: 「已更新到 PPVPN {v}」 at the top of the overview, once,
 //   after the service installed this build; closed by its button or 10
 //   seconds after the window is first on screen (the app may start in the
@@ -6,6 +6,9 @@
 // - InstallingNotice: the window of an app opened while the service is
 //   installing an update (docs/host-integration.md section 16.5); the app
 //   quits on 「好」 or after 10 seconds, and connects nothing meanwhile.
+// - UpdatingNotice: the window while this launch hands a downloaded update
+//   to the service (section 16.1), before the client starts; no button, the
+//   app quits once the service accepts or carries on as usual.
 
 import 'dart:async';
 
@@ -152,6 +155,35 @@ class _InstallingNoticeState extends State<InstallingNotice> {
               Text(s('updInstalling'), textAlign: TextAlign.center, style: t.sectionTitle),
               const SizedBox(height: 18),
               Button(kind: ButtonKind.primary, label: s('ok'), onPress: widget.onDone),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// The whole window while this launch installs an update.
+class UpdatingNotice extends StatelessWidget {
+  const UpdatingNotice({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final t = Tokens.of(context);
+    final s = S.current;
+    return ColoredBox(
+      color: t.bg,
+      child: Center(
+        child: Padding(
+          padding: Tokens.pagePadding,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Spinner(color: t.accent, size: 28),
+              const SizedBox(height: 14),
+              Text(s('updUpdating'), textAlign: TextAlign.center, style: t.sectionTitle),
+              const SizedBox(height: 6),
+              Text(s('updUpdatingD'), textAlign: TextAlign.center, style: t.body.copyWith(color: t.t2)),
             ],
           ),
         ),
