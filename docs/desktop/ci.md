@@ -12,7 +12,7 @@
 | --- | --- | --- |
 | `desktop` | ubuntu-latest | 桌面各层，客户端 crate 只编译一次（`CARGO_BUILD_TARGET` 固定目标目录）：`crates/service`（进程内托管 TUN 引擎）的 `cargo test` 和 clippy（`-D warnings`）；`ppvpn-client` 的测试和 clippy（链接 Rust `ppvpn-core`、sail 和预编译 BoringSSL）；`bash -n` 和 `tools/desktop/ci` 的 Python 测试；Swift 绑定（`apps/macos/scripts/build-swift-linux.sh`，Swift 用 swift.org 的工具链并校验签名）和 macOS 推送代理的 `AppLogic` 测试（不含 AppKit） |
 | `linux` | ubuntu-latest | 增强模式端到端：以 root 运行特权 service，客户端 crate 经它连接和断开（`src/e2e_linux.rs`，feature `linux-e2e`），本地假后端和 Shadowsocks 节点（`test/fakenode`）；检查 TUN、策略路由、经节点的流量，以及断开后和 kill -9 后的清理 |
-| `macos` | macos-15 | 客户端和 service 在 aarch64、x86_64 上的 clippy；`ppvpn-client` 的平台测试（`detect`、`service`、`sysproxy`）；`bootstrap.sh` 之后用 `xcodebuild` 构建 Debug app（ad-hoc 签名，不嵌入 core 和 service） |
+| `macos` | macos-15 | Rust 平台检查和客户端、service 的平台测试；不构建旧原生 app 或推送代理。Flutter app 的构建、APNs profile/Swift mailbox 测试和安装包检查在 `flutter (macos-15)` 中 |
 | `windows` | windows-latest | 客户端和 service 在 MSVC 上的 clippy；`ppvpn-client` 的平台测试；G7 Windows。不打安装包，不签名 |
 
 `crates/desktop` 和 `crates/service` 是 workspace 成员但不在 default-members 里，所以由这些 job
@@ -25,7 +25,8 @@
 
 安装包都是 Flutter 版（`apps/flutter`，#401）：`apps/flutter/scripts/ci-build.sh` 构建 app，再由
 `package-linux.sh`、`tools/desktop/ci/build-macos-native.sh`（经 `package-macos.sh`）、`package-windows.ps1` 打包，
-文件名、更新源和签名都和原生版相同，已装的原生版原地升级。原生版已删除（#522），macOS 只留推送代理和打包。
+文件名、更新源和签名都和原生版相同，已装的原生版原地升级。原生 app 已删除（#522）；macOS 改用 APNs（#539），
+旧代理代码保留但不随包分发，只保留 LaunchAgent plist 供迁移。Sparkle 由独立 SwiftPM 清单和锁文件解析。
 
 - 每次合入 main：`linux`（deb 和 rpm）、`macos`（每个架构一个 DMG 和 .pkg）、`windows`（NSIS）构建安装包，不读任何密钥
   （Windows 不签名、macOS ad-hoc 签名、没有更新签名），作为 workflow artifact；`linux-smoke` 把 deb 和 rpm 各离线安装一次（依赖包来自缓存，在 main 上保存），

@@ -1,7 +1,7 @@
 # PPVPN Desktop
 
-PPVPN 的桌面客户端：三个平台都是 Flutter 版（`apps/flutter`），macOS 的推送代理是 Swift 写的，
-共用 Rust 客户端核心 `crates/desktop`（crate `ppvpn-desktop`，UniFFI 绑定）和特权服务 `crates/service`。
+PPVPN 的桌面客户端：三个平台都是 Flutter 版（`apps/flutter`），macOS 由应用直接接收 APNs，Windows/Linux
+继续使用推送代理。它们共用 Rust 客户端核心 `crates/desktop`（crate `ppvpn-desktop`）和特权服务 `crates/service`。
 网络引擎是 Rust `ppvpn-core`（仓库根的 `crates/core`），都在进程内运行：标准模式在
 应用进程里，增强模式（TUN）在特权服务进程里。
 
@@ -20,9 +20,11 @@ PPVPN 的桌面客户端：三个平台都是 Flutter 版（`apps/flutter`），
 - **Linux**：从 PPVPN 的 apt、dnf 仓库安装，之后的更新也从那里来，命令见 [apps/flutter/packaging/linux/README.md](../../apps/flutter/packaging/linux/README.md)。
 - **macOS**：打开 DMG（Apple 芯片用 `macos-arm64`，Intel 用 `macos-x64`），把 PPVPN 拖进"应用程序"。需要 macOS 13 或更新的系统。
 
-### macOS：首次打开被拦截
+### macOS：旧版首次打开被拦截
 
-macOS 版用 PPVPN 自己的固定证书签名，没有经过 Apple 公证（还没有 Apple Developer ID）。从浏览器下载后，系统会
+下面是 Developer ID 之前旧版的处理步骤。当前正式构建签名、公证并携带 APNs profile，见
+[macOS 打包与安装](../../apps/macos/README.md#signing-and-installing)；本地或 CI 的无凭据构建不启用 APNs。
+旧版用 PPVPN 自己的固定证书签名，没有经过 Apple 公证。从浏览器下载后，系统会
 先拦下 DMG，再拦下应用，各要放行一次，提示是"无法验证……是否包含恶意软件"：
 
 1. **DMG**：双击 DMG，在提示里点"完成"；马上打开"系统设置 → 隐私与安全性"，拉到最下面的"安全性"一段，点
@@ -59,7 +61,7 @@ macOS 13、14 也可以在访达里按住 Control 点（或右键点）DMG 和 P
 ```
 apps/
 ├── flutter/        # Flutter 应用（桌面和移动端）、推送代理（Windows、Linux）、安装包（packaging/）
-├── macos/          # 推送代理（macOS）和它的 AppLogic（可在 Linux 上测试）、打包脚本
+├── macos/          # 打包脚本；旧代理和 AppLogic 源码保留，但代理不再分发
 └── assets/icons/   # 品牌与托盘图标
 crates/
 ├── account/        # 账号代码（与 CLI 共用）：后端 API、设备登录、推送设备注册、Profile 视图

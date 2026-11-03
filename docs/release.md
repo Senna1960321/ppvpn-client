@@ -56,6 +56,24 @@
 - 换后端域名只改变量，不改代码。
 - 原生版（`apps/macos`、`apps/windows`、`apps/linux`）不再发行，它们的构建文件里还留着旧的默认地址，没有改。
 
+## macOS APNs 签名与配置
+
+macOS 通知由 Flutter 应用直接接入 APNs（#539）。在 `desktop-release-stable`，以及需要 Developer ID
+签名的 `desktop-release-dev` 环境里配置 secret `MACOS_APNS_PROFILE_BASE64`：Apple Developer 门户生成的
+**Developer ID** provisioning profile 的 base64 内容。它必须对应显式 App ID
+`com.peakpassvpn.ppvpn.desktop`，授权 `com.apple.developer.aps-environment=production`，且 Team ID 与
+`crates/service/src/macos_team_id` 一致；profile 中必须包含本次 `MACOS_SIGNING_P12_BASE64` 的签名证书。
+开发、App Store、过期、通配 App ID、允许调试或证书不匹配的 profile 都会被打包脚本拒绝。
+
+这个 secret 只传给受发布环境保护的 `macos` 打包 job；stable 仍须先通过 `approve`。脚本在临时目录解码，
+经 `apps/flutter/scripts/macos-push-profile.py` 校验后嵌入 `Contents/embedded.provisionprofile`，再签名和公证。
+所有 Developer ID 构建都必须带匹配的 profile，不能缺失后继续发布；本地直接打包时用 `PPVPN_MACOS_APNS_PROFILE`
+传文件路径。无 Team ID 的 ad-hoc / CI 自签名构建移除 profile 和受限 entitlement，并关闭 APNs 注册。
+
+安装包不再带 `PPVPN Agent.app` 或 `PPVPNClientFFI.framework`；旧 LaunchAgent plist 仅供升级时注销旧 job。
+Sparkle 由 `apps/flutter/packaging/macos/SparkleArtifacts` 的清单和锁文件独立解析，不再依赖代理的 Xcode 构建。
+签名后的真实推送和旧代理升级验收见 [macOS QA 清单](desktop/qa-checklist.md#macos)，无凭据打包检查不能替代它们。
+
 ## Windows 签名（Azure Artifact Signing）
 
 `windows` job 在发布环境（`desktop-release-dev`、`desktop-release-stable`）里、下表的变量都在时用

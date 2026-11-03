@@ -76,4 +76,4 @@
   - 已登录时 UI 进程把设备注册到后端（`POST /api/v1/devices/register`，`platform` 为 `ios` / `android`，带 `token` 和可选的 `bundle_id`）。登录、每次启动和令牌变化时都会注册；令牌变了先注销旧的。
   - 退出登录时按令牌注销（`POST /api/v1/devices/unregister`，尽力而为）。令牌属于设备，保存在 UI 进程数据目录的 `push-token.json`（0600），退出登录后保留，下次登录直接再注册。
   - 通知内容是 `title` + `body`，`extra` 里带 `message_id` 和 `deep_link`。展示和点击跳转由原生层处理，点开后按 `message_id` 拉正文。
-  - 桌面平台不使用这个调用：Windows、Linux 和目前的 macOS 仍走自建推送代理。
+  - macOS 也使用这个调用，以 `platform=macos` 和桌面 bundle ID 注册 APNs；见 [macOS 通知](../apps/flutter/README.md#macos-push-notifications)。Windows、Linux 仍走自建推送代理。iOS/Android 原生推送宿主的接入独立于这项 macOS 实现。

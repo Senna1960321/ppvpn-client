@@ -1,10 +1,10 @@
 # 构建
 
 命令都在仓库根执行，路径相对仓库根。完整步骤在 `apps/flutter/README.md`（三个平台的 Flutter
-桌面应用和安装包）和 `apps/macos/README.md`（macOS 的推送代理和打包）。
+桌面应用和安装包）和 `apps/macos/README.md`（macOS 打包与保留的旧代理代码）。
 
 工具链：Rust 1.98.1（仓库根的 `rust-toolchain.toml`）；Flutter（`apps/flutter/scripts/install-flutter.sh`）；
-macOS 用 Xcode、XcodeGen 和 Swift 6.4。
+macOS 用 Xcode 和 Swift；当前打包不再需要 XcodeGen，只有手动构建旧代理才需要它。
 
 ## 共用的前置步骤
 
@@ -22,8 +22,8 @@ cargo build --locked -p ppvpn-service --profile service --bins
 ## 各平台
 
 - 三个平台的桌面应用都是 Flutter 版（`apps/flutter`），`apps/flutter/scripts/ci-build.sh` 构建。
-- **macOS**：`apps/flutter/scripts/package-macos.sh` 打包，它用 `apps/macos/scripts/bootstrap.sh`
-  生成 `PPVPNClient` Swift 包和 `PPVPN.xcodeproj`，构建推送代理（`PPVPNAgent`）。
+- **macOS**：`apps/flutter/scripts/package-macos.sh` 用 `packaging/macos/SparkleArtifacts` 独立解析
+  Sparkle，不再 bootstrap 或构建旧代理/FFI。签名构建所需的 APNs profile 见 [发布配置](../release.md#macos-apns-签名与配置)。
 - **Linux、Windows**：deb/rpm 由 `apps/flutter/scripts/package-linux.sh` 打包，Windows 安装包由
   `apps/flutter/scripts/package-windows.ps1` 打包（MSVC 工具链），两者都自己构建 service。Windows
   安装包里另有 `wintun.dll`（增强模式的 TUN 驱动，`package-windows.ps1` 下载并按哈希校验）。
@@ -37,7 +37,7 @@ tools/desktop/build-service.sh macos
 
 macOS 的打包（`apps/flutter/scripts/package-macos.sh`）需要这些产物。
 
-## 尚未迁入的部分
+## 安装包工作流
 
-安装包的打包与发布工作流尚未迁入：安装包暂时不从本仓库构建。每次提交的 CI 见
-[docs/desktop/ci.md](ci.md)。
+安装包由本仓库的 `release.yml` 构建；PR 的 macOS 打包检查在 `ci.yml` 的 `flutter` job 里。
+触发条件见 [docs/desktop/ci.md](ci.md)，手工验收见 [QA 清单](qa-checklist.md)。
