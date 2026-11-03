@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Thin a built PPVPN.app to one architecture, re-sign it inside out, and wrap
-# it in the DMG, the .pkg and the release metadata: the second half of
+# it in a ZIP, the .pkg and the release metadata: the second half of
 # apps/flutter/scripts/package-macos.sh, with the artifacts the native app
 # shipped.
 #
@@ -9,18 +9,18 @@
 #                              "Developer ID Application: … (<team>)" (default: ad-hoc "-")
 #   PPVPN_CODESIGN_TEAM        with a Developer ID identity, its Team ID (#471): secure
 #                              timestamps, Apple's designated requirements, no
-#                              disable-library-validation, and the DMG signed too.
+#                              disable-library-validation.
 #                              Without it (a self-signed identity, CI) each designated
 #                              requirement pins the certificate instead
 #   PPVPN_INSTALLER_IDENTITY   "Developer ID Installer: … (<team>)": productsign the pkg
 #                              (needs PPVPN_CODESIGN_TEAM)
 #   PPVPN_NOTARY_KEY_FILE      App Store Connect API key (.p8) for notarytool, with
 #   PPVPN_NOTARY_KEY_ID        its key id and issuer: notarize and staple the app, then
-#   PPVPN_NOTARY_ISSUER        the DMG and the pkg (needs PPVPN_CODESIGN_TEAM)
+#   PPVPN_NOTARY_ISSUER        the pkg (needs PPVPN_CODESIGN_TEAM)
 #   PPVPN_APP_ENTITLEMENTS     sign the app itself with this file (default: keep
 #                              the entitlements Xcode signed it with)
 #   PPVPN_RELEASE_CHANNEL      dev | stable, recorded in release-meta (unset: null)
-#   SPARKLE_PRIVATE_KEY_FILE   when set, sign the DMG for Sparkle and the pkg for
+#   SPARKLE_PRIVATE_KEY_FILE   when set, sign the ZIP for Sparkle and the pkg for
 #                              the service's silent updates (sign_update, #548)
 #   PPVPN_SOURCE_PACKAGES      the Xcode build's SourcePackages, where Sparkle's
 #                              sign_update is (needed with SPARKLE_PRIVATE_KEY_FILE)
@@ -30,12 +30,12 @@
 # PPVPNClientFFI.framework and the service helpers in Contents/MacOS.
 #
 # Output (dist/macos), <platform> = macos-arm64 | macos-x64:
-#   PPVPN-<version>-<platform>.dmg   Sparkle's updates and manual installs
+#   PPVPN-<version>-<platform>.zip   Sparkle's update archive
 #   PPVPN-<version>-<platform>.pkg   first installs: Installer puts the app in
 #                                    /Applications (packaging/postinstall); also
 #                                    what the service installs silently (#548)
 #   release-meta-<platform>.json   what the update site's feed and pointer are written from;
-#                                  file/length/sha256/ed_signature are the DMG's,
+#                                  file/length/sha256/ed_signature are the ZIP's,
 #                                  install_file/install_length/install_sha256/
 #                                  install_ed_signature the pkg's
 set -Eeuo pipefail
@@ -257,7 +257,7 @@ staple() {
   done
 }
 # The app first, and its ticket stapled to it: a copy of the app outside the
-# DMG and the pkg (and the one Sparkle unpacks) opens offline too.
+# ZIP and the pkg (and the one Sparkle unpacks) opens offline too.
 if [[ "$NOTARIZE" == 1 ]]; then
   ditto -c -k --keepParent "$APP" "$WORK/PPVPN.zip"
   notarize "$WORK/PPVPN.zip"
@@ -271,44 +271,29 @@ plist() { /usr/libexec/PlistBuddy -c "Print $1" "$APP/Contents/Info.plist"; }
 VERSION="$(plist CFBundleShortVersionString)"
 BUILD="$(plist CFBundleVersion)"
 MIN_OS="$(plist LSMinimumSystemVersion)"
-DMG="$OUT_DIR/PPVPN-$VERSION-$PLATFORM.dmg"
-STAGE="$(mktemp -d)"
-trap 'rm -rf "$STAGE" "$MACHO" "$WORK"' EXIT
-
-cp -R "$APP" "$STAGE/"
-ln -s /Applications "$STAGE/Applications"
+ZIP="$OUT_DIR/PPVPN-$VERSION-$PLATFORM.zip"
 mkdir -p "$OUT_DIR"
-rm -f "$DMG"
-# hdiutil create sometimes fails with "Resource busy" on CI runners (its
-# temporary image is still attached, or a leftover volume is). Detach those
-# and try again, three times at most.
-for try in 1 2 3; do
-  if hdiutil create -volname "PPVPN" -srcfolder "$STAGE" -fs HFS+ -format UDZO -imagekey zlib-level=9 "$DMG" >/dev/null; then
-    break
-  fi
-  [[ "$try" -lt 3 ]] || { echo "error: hdiutil create failed $try times" >&2; exit 1; }
-  echo "warning: hdiutil create failed (try $try), retrying" >&2
-  for volume in /Volumes/PPVPN*; do
-    [[ -d "$volume" ]] && hdiutil detach -force "$volume" >/dev/null 2>&1 || true
-  done
-  rm -f "$DMG"
-  sleep $((try * 5))
-done
-if [[ -n "$TEAM" ]]; then
-  codesign --force --sign "$SIGN_IDENTITY" --timestamp "$DMG"
-else
-  codesign --force --sign - "$DMG"
+rm -f "$ZIP"
+# Archive only after stapling: Sparkle verifies these exact bytes, and the
+# extracted app carries its ticket for offline launches. The archive itself
+# needs neither a Developer ID signature nor a separate notarization.
+ditto -c -k --keepParent "$APP" "$ZIP"
+ditto -x -k "$ZIP" "$WORK/extracted"
+ZIP_APP="$WORK/extracted/$(basename "$APP")"
+codesign --verify --deep --strict --verbose=2 "$ZIP_APP"
+if [[ "$NOTARIZE" == 1 ]]; then
+  xcrun stapler validate "$ZIP_APP"
 fi
-echo "wrote $DMG"
+echo "wrote $ZIP"
 
 # The first-install package: the same app, installed only to /Applications
 # (not relocated to another copy of the bundle id Installer finds, such as
-# the mounted DMG), with packaging/postinstall and nothing else. Signed with
+# a mounted older DMG), with packaging/postinstall and nothing else. Signed with
 # the Developer ID Installer identity when there is one; unsigned, Gatekeeper
 # asks once for it. The app it installs has no quarantine.
 PKG="$OUT_DIR/PPVPN-$VERSION-$PLATFORM.pkg"
 PKG_STAGE="$(mktemp -d)"
-trap 'rm -rf "$STAGE" "$MACHO" "$WORK" "$PKG_STAGE"' EXIT
+trap 'rm -rf "$MACHO" "$WORK" "$PKG_STAGE"' EXIT
 mkdir "$PKG_STAGE/root" "$PKG_STAGE/scripts"
 ditto "$APP" "$PKG_STAGE/root/PPVPN.app"
 install -m 755 "$APP_DIR/packaging/postinstall" "$PKG_STAGE/scripts/postinstall"
@@ -330,21 +315,12 @@ pkgutil --payload-files "$PKG" | grep -qx './PPVPN.app/Contents/MacOS/PPVPN' \
   || { echo "error: $PKG does not install PPVPN.app" >&2; exit 1; }
 echo "wrote $PKG"
 
-# Both notarized at once, then their tickets stapled: the release metadata's
-# lengths and hashes (and Sparkle's signature) are of the stapled files.
+# The package still needs its own ticket. Finish it before measuring and
+# signing the release artifacts; the ZIP already contains the stapled app.
 if [[ "$NOTARIZE" == 1 ]]; then
-  notarize "$DMG" & dmg_job=$!
-  notarize "$PKG" & pkg_job=$!
-  failed=0
-  wait "$dmg_job" || failed=1
-  wait "$pkg_job" || failed=1
-  [[ "$failed" == 0 ]] || exit 1
-  for file in "$DMG" "$PKG"; do
-    staple "$file"
-  done
-  # Gatekeeper's verdicts, as a download gets them.
-  spctl -a -vv -t exec "$APP"
-  spctl -a -vv -t open --context context:primary-signature "$DMG"
+  notarize "$PKG"
+  staple "$PKG"
+  spctl -a -vv -t exec "$ZIP_APP"
   spctl -a -vv -t install "$PKG"
 fi
 
@@ -361,7 +337,7 @@ if [[ -n "${SPARKLE_PRIVATE_KEY_FILE:-}" ]]; then
     [[ -n "$signature" ]] || { echo "error: sign_update produced no signature for $1" >&2; exit 1; }
     printf '%s' "$signature"
   }
-  ED_SIGNATURE="$(ed_signature "$DMG")"
+  ED_SIGNATURE="$(ed_signature "$ZIP")"
   # The service checks the pkg with the same key before it installs it (#548).
   INSTALL_ED_SIGNATURE="$(ed_signature "$PKG")"
 fi
@@ -378,9 +354,9 @@ json.dump({
     "channel": "$CHANNEL" or None,
     "version": "$VERSION",
     "build": "$BUILD",
-    "file": "$(basename "$DMG")",
-    "length": $(stat -f %z "$DMG"),
-    "sha256": "$(shasum -a 256 "$DMG" | cut -d' ' -f1)",
+    "file": "$(basename "$ZIP")",
+    "length": $(stat -f %z "$ZIP"),
+    "sha256": "$(shasum -a 256 "$ZIP" | cut -d' ' -f1)",
     "ed_signature": "$ED_SIGNATURE" or None,
     "install_file": "$(basename "$PKG")",
     "install_length": $(stat -f %z "$PKG"),

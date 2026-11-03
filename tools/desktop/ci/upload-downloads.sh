@@ -14,10 +14,10 @@
 # Sparkle feed /api/v1/desktop/releases/<platform>/appcast.xml from it. Nothing is registered
 # with the backend: moving the pointers is the release.
 #
-# macOS also has a first-install package (.pkg) next to the DMG, which /download serves when
+# macOS also has a first-install package (.pkg) next to the update archive, which /download serves when
 # the pointer names it: install_file, install_length and install_sha256 in the release-meta,
 # install_path (its key) added to the pointer. All of them or none (the backend answers 503
-# to a partial set; none means the DMG), and only on macOS. The DMG stays in file/path: the
+# to a partial set; none means the update archive), and only on macOS. The update archive stays in file/path: the
 # Sparkle feeds update from it. The pkg's EdDSA signature (install_ed_signature, for the
 # service's silent updates, #548) is for the update site; the pointers leave it out, so the
 # backend sees the same three fields as before.
@@ -69,6 +69,7 @@ POINTER_CACHE="no-cache, no-store, must-revalidate"
 sha256() { sha256sum "$1" | cut -d' ' -f1; }
 content_type() {
   case "$1" in
+    *.zip) echo "application/zip" ;;
     *.dmg) echo "application/x-apple-diskimage" ;;
     *.pkg) echo "application/octet-stream" ;;
     *.exe) echo "application/vnd.microsoft.portable-executable" ;;

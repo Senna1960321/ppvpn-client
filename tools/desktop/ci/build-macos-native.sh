@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the macOS app as one DMG (and .pkg) per architecture, plus release
+# Build the macOS app as one ZIP (and .pkg) per architecture, plus release
 # metadata for each: macos-arm64 (Apple silicon) and macos-x64 (Intel), both
 # built on an Apple silicon runner, from the Flutter app
 # (apps/flutter/scripts/package-macos.sh, #401).
@@ -20,14 +20,14 @@
 #                              <site>/desktop/<channel>/appcast-<platform>.xml;
 #                              without either, the build has no update feed
 #   PPVPN_SPARKLE_PUBLIC_KEY   EdDSA public key; empty disables updates
-#   SPARKLE_PRIVATE_KEY        EdDSA private key (base64); signs the DMGs and pkgs
+#   SPARKLE_PRIVATE_KEY        EdDSA private key (base64); signs the ZIPs and pkgs
 #   MACOS_SIGNING_P12_BASE64   the Developer ID Application certificate + key of
 #   MACOS_SIGNING_P12_PASSWORD   our team (crates/service/src/macos_team_id, #471);
 #                              without them builds are ad-hoc
 #   MACOS_INSTALLER_P12_BASE64 the Developer ID Installer certificate + key: signs
 #   MACOS_INSTALLER_P12_PASSWORD the pkg
 #   ASC_KEY_ID, ASC_ISSUER_ID, App Store Connect API key (contents of the .p8):
-#   ASC_KEY_P8                 notarizes the app, the DMG and the pkg
+#   ASC_KEY_P8                 notarizes the app and the pkg
 #   A stable build needs all three; anything else signs and notarizes with
 #   what it has, and builds ad hoc (with a warning) when the certificate is
 #   not our Developer ID Application (the dev environment's old one).
@@ -217,6 +217,6 @@ for arch in $MACOS_ARCHS; do
   fi
   [[ "$feed" == "$expected" ]] || { echo "feed URL mismatch ($arch): $feed" >&2; exit 4; }
 
-  cp "dist/macos/"*"-$platform.dmg" "dist/macos/"*"-$platform.pkg" "dist/macos/release-meta-$platform.json" "$staging_dir/"
+  cp "dist/macos/"*"-$platform.zip" "dist/macos/"*"-$platform.pkg" "dist/macos/release-meta-$platform.json" "$staging_dir/"
 done
 ls -l "$staging_dir"

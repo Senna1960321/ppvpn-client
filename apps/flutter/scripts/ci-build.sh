@@ -50,7 +50,7 @@
 #                        start
 #   MACOS_ARCHS          macOS: the library's slices, "arm64 x86_64" joined
 #                        into one, or one of them (release.yml builds each
-#                        architecture's DMG in a job of its own, #459)
+#                        architecture's ZIP in a job of its own, #459)
 #                        (default: the runner's architecture only)
 #   PPVPN_SKIP_ANALYZE   1: no flutter analyze (ci.yml analyzes on Linux)
 #   and what rust/src/update.rs and bridge.rs bake into the library:
@@ -446,7 +446,7 @@ PY
   ruby -e 'require "xcodeproj"' 2>/dev/null || gem install --user-install --no-document xcodeproj -v 1.27.0
   ruby scripts/ios-tunnel-target.rb ios/Runner.xcodeproj "$version" "$build"
 elif [ "$os" = macos ] && [ -n "${MACOS_ARCHS:-}" ]; then
-  # Flutter's release app is universal; package-app.sh thins each DMG's copy.
+  # Flutter's release app is universal; package-app.sh thins each ZIP's copy.
   slices=()
   for arch in $MACOS_ARCHS; do
     case $arch in

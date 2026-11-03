@@ -14,7 +14,7 @@ is gone (#522). What stays here:
 - `project.yml` (XcodeGen), whose `PPVPNAgent` target also resolves Sparkle,
   which the Flutter app's package takes from that build.
 - `scripts/package-app.sh` and `packaging/postinstall`: thinning, signing,
-  the DMG, the .pkg and the release metadata, run by
+  the ZIP, the .pkg and the release metadata, run by
   `apps/flutter/scripts/package-macos.sh`.
 
 Paths and commands here are relative to the repository root.
@@ -36,16 +36,16 @@ swift test --package-path apps/macos/AppLogic
 `PPVPN.xcodeproj` and `PPVPNClient/` are generated and git-ignored; re-run
 `bootstrap.sh` after `project.yml` or the ppvpn-client interface changes.
 
-## Release DMG and package
+## Release ZIP and package
 
 `apps/flutter/scripts/package-macos.sh` puts the agent, the shared
 `PPVPNClientFFI.framework`, Sparkle and the service helpers into the Flutter
 app, then `package-app.sh` thins every Mach-O to the one architecture and
 re-signs inside out, checks each binary's architecture, that the agent links
 the single framework in `Contents/Frameworks`, and the signature. It writes
-the DMG, the package and `release-meta-macos-<arm64|x64>.json` (schema 1:
+the ZIP, the package and `release-meta-macos-<arm64|x64>.json` (schema 1:
 platform, channel, version, build, file, length, sha256, ed_signature, min_os,
-published_at, all of the DMG, plus install_file, install_length,
+published_at, all of the ZIP, plus install_file, install_length,
 install_sha256 and install_ed_signature of the package), from which the
 update site's feed is written.
 The package (`pkgbuild`) installs only to /Applications, is not relocatable,
@@ -75,10 +75,13 @@ key (`ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_KEY_P8`) to notarytool.
   registration, the notification permission);
 - takes `com.apple.security.cs.disable-library-validation` out of the
   entitlements: every embedded library carries the same Team ID;
-- notarizes the app and staples its ticket, builds the DMG (signed) and the
-  pkg (`productsign`, Developer ID Installer) from it, notarizes and staples
-  both, and checks Gatekeeper's verdict on all three;
-- only then signs the DMG for Sparkle and writes the release metadata.
+- notarizes the app and staples its ticket, then archives it with
+  `ditto -c -k --keepParent`; extracts the ZIP and verifies the app's signature
+  and stapled ticket. The ZIP needs no separate notarization;
+- builds the pkg (`productsign`, Developer ID Installer), notarizes and
+  staples it, and checks Gatekeeper's verdict on the app and package;
+- signs the final ZIP and pkg for Sparkle and writes their exact lengths,
+  hashes and signatures to the release metadata.
 
 A stable build without the identities or the API key fails. Without them
 (local builds, pull requests) signing falls back to ad-hoc; CI's packaging
@@ -94,9 +97,9 @@ administrator prompt.
 
 Installing: open the downloaded .pkg; Installer puts the app in
 /Applications. The installed app has no quarantine attribute, opens without
-asking and is not translocated. From the DMG instead, drag the app to
-Applications in Finder. Updates installed by Sparkle keep the same
-signature.
+asking and is not translocated. The ZIP is the Sparkle update archive;
+first installs continue to use the pkg. Previously published DMGs are kept
+unchanged. Updates installed by Sparkle keep the same signature.
 
 ## Logs
 

@@ -6,7 +6,7 @@ name: release
 # On every push to main (a merge):
 #   - the installers of the Flutter app (apps/flutter, #401; the native apps
 #     no longer ship, #522), without any
-#     secret: Windows (NSIS, unsigned), macOS (one DMG and .pkg per
+#     secret: Windows (NSIS, unsigned), macOS (one ZIP and .pkg per
 #     architecture, ad-hoc signed) and Linux (deb and rpm), each with its
 #     release metadata, as workflow artifacts; the rpm installed under dnf,
 #     and the apt and dnf repositories built from the packages and installed
@@ -1015,7 +1015,7 @@ jobs:
             dist/windows/*-setup.exe
             dist/windows/release-meta-windows-x64.json
 
-  # One DMG and .pkg per architecture of the Flutter app (#401), each built
+  # One ZIP and .pkg per architecture of the Flutter app (#401), each built
   # end to end in its own chain of jobs (#459), all on Apple silicon runners;
   # nothing is joined into a universal binary. A merge builds arm64 only
   # (prepare's macos, #459); runs by hand build both. Per architecture:
@@ -1146,7 +1146,7 @@ jobs:
     runs-on: macos-15
     environment: ${{ needs.prepare.outputs.environment }}
     # Packaging (~15 min), then two notarization waits one after the other
-    # (the app, then the DMG and pkg together), each up to an hour
+    # (the app, then the pkg), each up to an hour
     # (tools/notarize.sh): a new team's first submissions are slow.
     timeout-minutes: 150
     env:
@@ -1188,7 +1188,7 @@ jobs:
           # The bundle's name as macos-app packed it.
           bundle="$(tar -tf "$RUNNER_TEMP/macos-app/app.tar" | sed -n 1p)"
           echo "bundle=$RUNNER_TEMP/bundle/${bundle%%/*}" >> "$GITHUB_OUTPUT"
-      - name: Build the DMG, pkg and release metadata
+      - name: Build the ZIP, pkg and release metadata
         env:
           PPVPN_FLUTTER_BUNDLE: ${{ steps.unpack.outputs.bundle }}
         run: bash tools/desktop/ci/build-macos-native.sh
@@ -1756,7 +1756,7 @@ jobs:
           newest=$(head -n 1 tags)
           mkdir newest
           gh release download "$newest" --repo "$GITHUB_REPOSITORY" --dir newest \
-            --pattern 'release-meta-*.json' --pattern '*.dmg' --pattern '*.pkg' --pattern '*-setup.exe'
+            --pattern 'release-meta-*.json' --pattern '*.dmg' --pattern 'PPVPN-*-macos-*.zip' --pattern '*.pkg' --pattern '*-setup.exe'
           echo "NEWEST=$newest" >> "$GITHUB_ENV"
       # A rehearsal's files come from the calling run, laid out as the one
       # release there is.
@@ -1779,7 +1779,7 @@ jobs:
           echo "$TAG" > tags
           mkdir -p "linux-releases/$TAG" newest "sums/$TAG"
           cp rehearsal-release/release-meta-linux-x64-*.json rehearsal-release/*.deb rehearsal-release/*.rpm "linux-releases/$TAG/"
-          cp rehearsal-release/release-meta-*.json rehearsal-release/*.dmg rehearsal-release/*.pkg rehearsal-release/*-setup.exe newest/
+          cp rehearsal-release/release-meta-*.json rehearsal-release/PPVPN-*-macos-*.zip rehearsal-release/*.pkg rehearsal-release/*-setup.exe newest/
           cp rehearsal-release/SHA256SUMS "sums/$TAG/SHA256SUMS"
           echo "NEWEST=$TAG" >> "$GITHUB_ENV"
       # The site redistributes only what the release workflow produced: every
