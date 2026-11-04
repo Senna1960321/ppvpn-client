@@ -1566,6 +1566,22 @@ mod tests {
             ErrorCode::ConnectFailed
         );
         assert_eq!(failed("failed to spawn ppvpn-core").reason_code(), None);
+        for (detail, expected) in [
+            (
+                "PROFILE_SCHEMA_UNSUPPORTED: startup failed [start_stage=profile]",
+                ErrorCode::ServiceIncompatible,
+            ),
+            (
+                "PROFILE_EXPIRED: expired [start_stage=profile]",
+                ErrorCode::ProfileExpired,
+            ),
+            (
+                "PERMISSION_DENIED: denied [start_stage=start]",
+                ErrorCode::ConnectFailed,
+            ),
+        ] {
+            assert_eq!(failed(detail).info().code, expected, "{detail}");
+        }
         assert_eq!(
             ServiceError::Unavailable("connect: No such file".into())
                 .info()

@@ -262,6 +262,13 @@ const _zh = <String, String>{
   'fr_install': '系统服务安装失败。',
   'fr_service': '系统服务没有响应，请稍后重试。',
   'fr_contended': '其他 VPN 或代理软件正在接管系统网络。',
+  'fr_connect': '增强模式未能启动。请重试，或暂时使用普通模式；仍失败时可复制诊断信息联系支持。',
+  'fr_health': '隧道启动后未能通过网络检查。请检查本机网络及其他 VPN 是否冲突，重试或暂时使用普通模式。',
+  'fr_clientRejected': '系统服务拒绝了此客户端。请从正式安装位置启动客户端，或重新安装后再试。',
+  'fr_driver': 'Windows 隧道驱动不可用，请重新安装最新版客户端后重试。',
+  'fr_permission': '系统拒绝了隧道启动权限，请重新授权安装系统服务后重试。',
+  'fr_tunBusy': '隧道资源正被占用，请断开现有 VPN 连接后重试。',
+  'copyDiagnostics': '复制诊断信息',
   // The tray (#401 step 3), from the handoff, and its own line for access
   // limited, which has no handoff string (marked).
   'noUnread': '没有未读消息',
@@ -526,6 +533,13 @@ const _en = <String, String>{
   'fr_install': 'The system service couldn’t be installed.',
   'fr_service': 'The system service isn’t responding. Try again later.',
   'fr_contended': 'Another VPN or proxy app is taking over the system network.',
+  'fr_connect': 'Enhanced mode could not start. Retry or use Compatible mode for now. Copy the diagnostics for support if it keeps failing.',
+  'fr_health': 'The tunnel started, but its network check failed. Check your network and other VPN apps, then retry or use Compatible mode for now.',
+  'fr_clientRejected': 'The system service rejected this client. Open the app from its installed location, or reinstall it and retry.',
+  'fr_driver': 'The Windows tunnel driver is unavailable. Reinstall the latest app and try again.',
+  'fr_permission': 'The system denied permission to start the tunnel. Authorize the system service installation again, then retry.',
+  'fr_tunBusy': 'Tunnel resources are in use. Disconnect the existing VPN connection, then retry.',
+  'copyDiagnostics': 'Copy diagnostics',
   // The tray (#401 step 3), from the handoff, and its own line for access
   // limited, which has no handoff string (marked).
   'noUnread': 'No unread messages',
@@ -565,4 +579,3 @@ const _en = <String, String>{
   'phoneStep3': 'The page closes and you are signed in',
   'reopenAuth': 'Open the Authorization Page Again',
 };
-

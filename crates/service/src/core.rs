@@ -483,7 +483,10 @@ impl CoreManager {
             );
         }
         let created = Instant::now();
-        let instance = self.launcher.launch(&self.state_dir, debug.is_some())?;
+        let instance = self
+            .launcher
+            .launch(&self.state_dir, debug.is_some())
+            .map_err(|error| start_error("create", error))?;
         info!(
             "ppvpn-core start: create took {} ms",
             created.elapsed().as_millis()
@@ -705,6 +708,18 @@ fn restart_process() {
 fn restart_process() {}
 
 /// Checks the schema, applies the profile and starts the data plane.
+/// Keep the leading stable code for older clients; append a small, safe
+/// phase marker while retaining the complete cause chain in local logs.
+fn start_error(stage: &str, error: anyhow::Error) -> anyhow::Error {
+    let detail = format!("{error:#}");
+    let bare_code = !detail.is_empty()
+        && detail
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_');
+    let separator = if bare_code { ": startup failed" } else { "" };
+    anyhow!("{detail}{separator} [start_stage={stage}]")
+}
+
 fn bring_up(
     instance: &dyn Instance,
     profile: &Value,
@@ -724,26 +739,31 @@ fn bring_up(
         phase = Instant::now();
     };
     let none = serde_json::json!({});
-    let version = instance.call(
-        "/v1/get-version",
-        none.clone(),
-        call_timeout("/v1/get-version", &none),
-    )?;
+    let version = instance
+        .call(
+            "/v1/get-version",
+            none.clone(),
+            call_timeout("/v1/get-version", &none),
+        )
+        .map_err(|error| start_error("version", error))?;
     let supported_schema = version
         .get("profile_schema_version")
         .and_then(Value::as_u64)
-        .ok_or_else(|| anyhow!("CORE_SCHEMA_CAPABILITY_MISSING"))?;
+        .ok_or_else(|| start_error("version", anyhow!("CORE_SCHEMA_CAPABILITY_MISSING")))?;
     if requested_schema != supported_schema {
-        return Err(anyhow!("PROFILE_SCHEMA_UNSUPPORTED"));
+        return Err(start_error(
+            "profile",
+            anyhow!("PROFILE_SCHEMA_UNSUPPORTED"),
+        ));
     }
     let body = apply_body(profile, hosts, mode, choices);
     let timeout = call_timeout("/v1/apply-profile", &body);
     let applied = instance.call("/v1/apply-profile", body, timeout);
     lap("apply-profile");
-    applied?;
+    applied.map_err(|error| start_error("profile", error))?;
     let started = instance.call("/v1/start", none.clone(), call_timeout("/v1/start", &none));
     lap("start (TUN, routes)");
-    started?;
+    started.map_err(|error| start_error("start", error))?;
     Ok(())
 }
 
@@ -1456,6 +1476,8 @@ pub(crate) mod tests {
     pub(crate) struct FakePlan {
         /// `/v1/start` fails.
         pub(crate) fail_start: bool,
+        pub(crate) fail_path: &'static str,
+        pub(crate) omit_schema: bool,
         /// This Core API path answers only after `slow_ms` (or once the
         /// instance shut down, or at the call's timeout).
         pub(crate) slow_path: &'static str,
@@ -1525,7 +1547,11 @@ pub(crate) mod tests {
                 }
             }
             self.engines.record(format!("{index} {path}"));
+            if path == self.plan.fail_path {
+                return Err(anyhow!("PERMISSION_DENIED: denied by OS"));
+            }
             match path {
+                "/v1/get-version" if self.plan.omit_schema => Ok(serde_json::json!({})),
                 "/v1/get-version" => Ok(serde_json::json!({
                     "core_version": "fake", "core_api_version": 1, "profile_schema_version": 1
                 })),
@@ -1556,6 +1582,9 @@ pub(crate) mod tests {
             let mut shared = self.0 .0.lock();
             let index = shared.instances.len() + 1;
             let plan = shared.plans.get(index - 1).copied().unwrap_or_default();
+            if plan.fail_path == "create" {
+                return Err(anyhow!("WINTUN_UNAVAILABLE: driver unavailable"));
+            }
             let instance = Arc::new(FakeInstance {
                 index,
                 plan,
@@ -1597,6 +1626,70 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn startup_failures_keep_the_code_and_identify_the_stage() {
+        for (path, stage) in [
+            ("create", "create"),
+            ("/v1/get-version", "version"),
+            ("/v1/apply-profile", "profile"),
+            ("/v1/start", "start"),
+        ] {
+            let (mut manager, engines) = fake_manager(vec![FakePlan {
+                fail_path: path,
+                ..Default::default()
+            }]);
+            let error = manager
+                .connect(connect_payload(&new_session(1)), std::process::id())
+                .unwrap_err()
+                .to_string();
+            let code = if stage == "create" {
+                "WINTUN_UNAVAILABLE"
+            } else {
+                "PERMISSION_DENIED"
+            };
+            assert!(error.starts_with(&format!("{code}:")), "{error}");
+            assert!(
+                error.ends_with(&format!("[start_stage={stage}]")),
+                "{error}"
+            );
+            assert!(manager.state.is_none());
+            if stage != "create" {
+                assert!(engines.events().contains(&"1 shutdown".to_string()));
+            }
+        }
+        let error = start_error("profile", anyhow!("PROFILE_SCHEMA_UNSUPPORTED")).to_string();
+        assert!(error.starts_with("PROFILE_SCHEMA_UNSUPPORTED:"));
+    }
+
+    #[test]
+    fn schema_handshake_failures_keep_their_stage_and_stop_the_instance() {
+        for missing in [false, true] {
+            let (mut manager, engines) = fake_manager(vec![FakePlan {
+                omit_schema: missing,
+                ..Default::default()
+            }]);
+            let mut body = connect_payload(&new_session(1));
+            body.profile["schema_version"] = serde_json::json!(2);
+            let error = manager
+                .connect(body, std::process::id())
+                .unwrap_err()
+                .to_string();
+            let (code, stage) = if missing {
+                ("CORE_SCHEMA_CAPABILITY_MISSING", "version")
+            } else {
+                ("PROFILE_SCHEMA_UNSUPPORTED", "profile")
+            };
+            assert!(error.starts_with(&format!("{code}:")), "{error}");
+            assert!(
+                error.ends_with(&format!("[start_stage={stage}]")),
+                "{error}"
+            );
+            assert!(manager.state.is_none());
+            assert!(engines.events().contains(&"1 shutdown".to_string()));
+            assert!(!engines.events().contains(&"1 /v1/start".to_string()));
+        }
+    }
+
+    #[test]
     fn a_failed_start_leaves_nothing_and_the_retry_gets_its_own_instance() {
         let failing = FakePlan {
             fail_start: true,
@@ -1609,7 +1702,10 @@ pub(crate) mod tests {
             .connect(connect_payload(&first), me)
             .unwrap_err()
             .to_string();
-        assert_eq!(error, "CORE_OPERATION_FAILED: core operation failed");
+        assert_eq!(
+            error,
+            "CORE_OPERATION_FAILED: core operation failed [start_stage=start]"
+        );
         assert!(manager.state.is_none(), "the failed instance is gone");
         assert!(engines.events().contains(&"1 shutdown".to_string()));
 

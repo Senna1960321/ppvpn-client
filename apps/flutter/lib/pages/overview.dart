@@ -10,9 +10,12 @@
 import 'dart:async';
 
 import 'package:flutter/widgets.dart';
+import 'package:flutter/foundation.dart';
 import 'package:forui/forui.dart';
 
 import '../app_state.dart';
+import '../connection_failure.dart';
+import '../settings.dart';
 import '../src/rust/api.dart' as rust;
 import '../strings.dart';
 import '../theme.dart';
@@ -687,13 +690,14 @@ class _InstallHint extends StatelessWidget {
 /// right: enhanced mode failed or is in use elsewhere, or the system proxy
 /// failed.
 class ProblemCard extends StatelessWidget {
-  const ProblemCard({required this.warn, required this.title, required this.description, required this.actions});
+  const ProblemCard({required this.warn, required this.title, required this.description, required this.actions, this.diagnostics});
 
   /// Warning tone (in use elsewhere) instead of the failure tone.
   final bool warn;
   final String title;
   final String description;
   final List<Widget> actions;
+  final String? diagnostics;
 
   /// The card for the snapshot's connection, or null while there is none.
   static ProblemCard? of(AppState app, rust.UiSnapshot snapshot) {
@@ -726,6 +730,12 @@ class ProblemCard extends StatelessWidget {
         title: '${s('tunMode')} · ${s('st_failed')}',
         description: enhancedReason(snapshot.error),
         actions: [...compatible, retry],
+        diagnostics: enhancedFailureReport(
+          version: Settings.version,
+          platform: defaultTargetPlatform.name,
+          code: snapshot.error?.code,
+          detail: snapshot.error?.detail,
+        ),
       ),
       rust.UiPhase.contended => ProblemCard(
         warn: true,
@@ -765,19 +775,9 @@ class ProblemCard extends StatelessWidget {
     };
   }
 
-  /// Why enhanced mode failed, for people; the code when there is no line
-  /// for it.
+  /// Why enhanced mode failed, without exposing raw service details.
   static String enhancedReason(rust.UiError? error) {
-    final s = S.current;
-    return switch (error?.code) {
-      'ServiceInstallCancelled' => s('fr_auth'),
-      'ServiceInstallFailed' => s('fr_install'),
-      'ServiceUnavailable' || 'ServiceIncompatible' => s('fr_service'),
-      'NetworkPathContended' => s('fr_contended'),
-      'Timeout' => s('fr_timeout'),
-      final code? => code,
-      null => s('st_failed'),
-    };
+    return S.current(enhancedFailureMessage(error?.code, error?.detail));
   }
 
   @override
@@ -791,7 +791,37 @@ class ProblemCard extends StatelessWidget {
         borderRadius: BorderRadius.circular(Tokens.cardRadius),
         border: Border.all(color: t.hair),
       ),
-      child: Row(
+      child: diagnostics != null
+          ? Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
+                  children: [
+                    Icon(FLucideIcons.circleAlert, size: 16, color: tone),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(title, style: t.sectionTitle),
+                          Text(description, style: t.note),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    ...actions,
+                    CopyButton(text: diagnostics!, label: S.current('copyDiagnostics')),
+                  ],
+                ),
+              ],
+            )
+          : Row(
         children: [
           Icon(FLucideIcons.circleAlert, size: 16, color: tone),
           const SizedBox(width: 10),
