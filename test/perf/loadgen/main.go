@@ -46,6 +46,9 @@ type result struct {
 	BytesReceived  int64 `json:"bytes_received"`
 	Connections    int64 `json:"connections"`
 	FailedConnects int64 `json:"failed_connections"`
+	// Echo streams whose entire write was echoed back without a write error.
+	// TCP connects alone count even when a capped TUN then resets the stream.
+	CompletedEchoes int64 `json:"completed_echoes"`
 	// stream: connections where one write made no progress for 10 s (the
 	// proxy took none of it); closed then.
 	Stalled   int64 `json:"stalled_connections"`
@@ -170,12 +173,14 @@ func stream(dial func() (net.Conn, error), conns int, rateMbit float64, duration
 			}
 			defer conn.Close()
 			atomic.AddInt64(&r.Connections, 1)
-			done := make(chan struct{})
+			done := make(chan int64, 1)
 			go func() {
 				n, _ := io.Copy(io.Discard, conn)
 				atomic.AddInt64(&r.BytesReceived, n)
-				close(done)
+				done <- n
 			}()
+			var sent int64
+			writeFailed := false
 			buf := make([]byte, chunk)
 			var tick <-chan time.Time
 			if interval > 0 {
@@ -189,8 +194,10 @@ func stream(dial func() (net.Conn, error), conns int, rateMbit float64, duration
 				// link still moves a chunk well within it.
 				_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 				n, err := conn.Write(buf)
+				sent += int64(n)
 				atomic.AddInt64(&r.BytesSent, int64(n))
 				if err != nil {
+					writeFailed = true
 					if errors.Is(err, os.ErrDeadlineExceeded) {
 						atomic.AddInt64(&r.Stalled, 1)
 					}
@@ -205,7 +212,10 @@ func stream(dial func() (net.Conn, error), conns int, rateMbit float64, duration
 				_ = tcp.CloseWrite()
 			}
 			select {
-			case <-done:
+			case received := <-done:
+				if !writeFailed && sent > 0 && received == sent {
+					atomic.AddInt64(&r.CompletedEchoes, 1)
+				}
 			case <-time.After(5 * time.Second):
 			}
 		}()

@@ -47,8 +47,11 @@ one (see ne-mem's doc):
 Prints one NEMEM JSON line per scenario and a Markdown table at the end
 (also appended to $GITHUB_STEP_SUMMARY when set). A scenario whose load
 failed (a connection refused, an echo short, a download empty, DNS mostly
-unanswered) is marked ✗: its numbers are not the load's. Exits 1 when one
-of the first variant's did.
+unanswered) is marked ✗: its numbers are not the load's. Exits 1 when the
+default (or, with --no-default, the first selected) variant fails. The ios
+variant is also checked: refused connections above its cap are expected,
+but fewer than 128 completed echoes, a stalled load, or failure below the
+cap still fails the run.
 """
 
 import argparse
@@ -98,6 +101,8 @@ VARIANTS = {
                                             "netstack.read_ahead=32"]},
     "budget": {"profile": "desktop", "set": ["netstack.budget=mobile"]},
     "mobile": {"profile": "mobile"},
+    # The shipped iOS host combines mobile tuning with this cap (#388).
+    "ios": {"profile": "mobile", "set": ["inbound.max_connections=128"]},
     # Not the profile's: the sessions a 35 MiB budget carries at about 150
     # KiB each (#388); the dispatcher refuses the rest, the TUN's included.
     "cap": {"profile": "desktop", "set": ["inbound.max_connections=128"]},
@@ -301,21 +306,31 @@ class PeakCounter:
         return self.peak
 
 
+DNS_RESPONSE_TIMEOUT = 11  # core DNS_TIMEOUT is 10s; allow delivery/scheduling.
+DNS_PORT = 53
+
+
 def dns_burst(count, rate=400):
     """count A queries for distinct names under example.net, through the
     TUN's DNS (any address port 53 is hijacked), rate a second; returns the
     answers that came back."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.settimeout(0.2)
-    answered = 0
+    answered = set()
     stop = threading.Event()
+    complete = threading.Event()
 
     def receive():
-        nonlocal answered
         while not stop.is_set():
             try:
-                sock.recvfrom(4096)
-                answered += 1
+                data, _ = sock.recvfrom(4096)
+                if len(data) < 12:
+                    continue
+                query_id, flags = struct.unpack(">HH", data[:4])
+                if flags & 0x8000 and query_id < count:
+                    answered.add(query_id)
+                    if len(answered) == count:
+                        complete.set()
             except OSError:
                 pass
     t = threading.Thread(target=receive, daemon=True)
@@ -325,21 +340,32 @@ def dns_burst(count, rate=400):
         q = struct.pack(">HHHHHH", i & 0xFFFF, 0x0100, 1, 0, 0, 0)
         q += b"".join(bytes([len(p)]) + p.encode() for p in name.split(".")) + b"\0"
         q += struct.pack(">HH", 1, 1)
-        sock.sendto(q, (DNS_IP, 53))
+        sock.sendto(q, (DNS_IP, DNS_PORT))
         time.sleep(1 / rate)
-    time.sleep(5)
+    # The old 5s cut-off counted queries still within the core's 10s
+    # resolution deadline as failures. Duplicated replies must not hide
+    # missing queries either.
+    complete.wait(DNS_RESPONSE_TIMEOUT)
     stop.set()
     t.join()
     sock.close()
-    return answered
+    return len(answered)
 
 
 def failure(row):
     """Why the scenario's load failed, or None."""
     load = row.get("load")
     if load is not None:
+        label = row.get("label", "")
+        if row.get("variant") == "ios" and label.startswith("conns"):
+            required = min(int(label.removeprefix("conns")), 128)
+            completed = load.get("completed_echoes", 0)
+            if completed < required:
+                return f"{completed} complete echoes; need {required}"
         if "error" in load or load.get("failed_connections"):
             return f"{load.get('failed_connections', '?')} connections failed"
+        if load.get("stalled_connections"):
+            return f"{load['stalled_connections']} connections stalled"
         if load.get("bytes_received", 0) == 0:
             return "nothing received"
         if load.get("bytes_sent") and load["bytes_received"] < load["bytes_sent"]:
@@ -347,6 +373,32 @@ def failure(row):
     if "answered" in row and row["answered"] < 0.95 * row["queries"]:
         return f"DNS: {row['answered']} of {row['queries']} answered"
     return None
+
+
+def expected_ios_refusal(row):
+    """An overloaded capped TUN can accept TCP then refuse the stream.
+
+    Keep the row's ✗ (the requested load did not all complete), but do not
+    fail CI for the intended cap. A dead/stalled tunnel still fails, as do
+    all scenarios at or below the cap and the subsequent recovery loads.
+    """
+    label = row["label"]
+    if row["variant"] != "ios" or not label.startswith("conns"):
+        return False
+    requested = int(label.removeprefix("conns"))
+    load = row.get("load", {})
+    return (requested > 128 and "error" not in load
+            and load.get("completed_echoes", 0) >= 128
+            and not load.get("stalled_connections", 0)
+            and load.get("failed_connections", 0) <= requested - 128)
+
+
+def failed_loads(rows, primary, dhat=False):
+    """Failures that invalidate the measurement, including ios when selected."""
+    return [row for row in rows
+            if row["variant"] in (primary, "ios") and row["failed"]
+            and not (dhat and row["failed"].startswith("DNS:"))
+            and not expected_ios_refusal(row)]
 
 
 def run(args, variant, settings, workers, ports, sizes, work):
@@ -471,6 +523,8 @@ def main():
         settings = settings or json.dumps(VARIANTS[name])
         json.loads(settings)
         variants.append((name, settings))
+    if not variants:
+        parser.error("--no-default needs at least one --variant")
     if os.geteuid() != 0:
         sys.exit("run as root: sail opens the TUN")
 
@@ -506,9 +560,10 @@ def main():
         os.chmod(args.out, 0o644)
     # dhat slows the engine enough that the DNS burst falls short (#388):
     # under --dhat only a failed transfer counts, the DNS row still shows ✗.
-    if any(r["failed"] and not (args.dhat and r["failed"].startswith("DNS:"))
-           for r in rows if r["variant"] == "default"):
-        sys.exit("a load failed on the default variant (✗ above)")
+    failed = failed_loads(rows, variants[0][0], bool(args.dhat))
+    if failed:
+        names = ", ".join(f"{r['variant']}/{r['label']}" for r in failed)
+        sys.exit(f"a required load failed: {names} (✗ above)")
 
 
 if __name__ == "__main__":

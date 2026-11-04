@@ -1,6 +1,6 @@
 # Performance checks, tiers A and B
 
-By hand on the test host (no workflow runs it since the Go core left main; see `docs/testing.md`), these scripts measure the numbers that barely depend on the machine:
+The tier A and B comparisons run by hand on the test host (see `docs/testing.md`). The separate Network Extension memory check also runs in CI, as described below. These scripts measure:
 
 - release binary sizes;
 - the engine process's RSS, both idle and under a fixed load;
@@ -18,6 +18,16 @@ By hand on the test host (no workflow runs it since the Go core left main; see `
 | `../../test/perf/fakenode` | The stand-in node, on loopback: Shadowsocks 2022, AnyTLS (with a certificate generated at start, trusted through `SSL_CERT_FILE`) and an echo sink. |
 | `../../test/perf/loadgen` | The fixed loads through the local proxy. |
 | `internal/runtime/perf_alloc_test.go` at tag v0.5.21 | The Go engine's allocation counts (the Go core is no longer on main). They compare only with the same engine. |
+
+## Network Extension memory (#388)
+
+`ne_mem.py --variant ios` combines Sail's mobile profile with `inbound.max_connections=128`, matching the iOS host. The Linux and macOS CI jobs use two workers and compare `default`, `cap`, `ios` and `budget`; `default` is the mobile profile without the host's cap. The Python acceptance tests and Go load-generator tests run before the measurements.
+
+A failed load in `default` exits nonzero; with `--no-default`, the first selected variant takes its place. The `ios` variant is always checked too. Its connection scenarios require complete echoes from every requested stream up to 128. Above the cap, at least 128 streams must complete without write errors or stalls; refused excess streams remain marked ✗ in the report. TCP handshakes alone do not count as completed loads. The existing `--dhat` exception only permits a failed DNS load, which remains visible.
+
+The DNS burst counts unique response IDs and waits up to 11 seconds after the last query, allowing the core's 10-second resolution deadline to finish; fewer than 95% replies still fail. Unlike the local transfer loads, these queries go through the fake node to public DoT resolvers. Their latency affects concurrent upstream connections and memory; the inbound connection cap does not bound those DNS connections in Sail 0.22.0 (sail#8).
+
+The 35 MiB core budget is reported with ⚠ when exceeded, not enforced by the load-success check. A passing load check is not proof that the memory budget is met. This harness excludes the Swift host; iPhone Network Extension acceptance still needs the real extension and its total process footprint.
 
 ## Metrics
 

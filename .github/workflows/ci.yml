@@ -368,13 +368,15 @@ jobs:
         if: steps.scope.outputs.memory == 'true'
         timeout-minutes: 40
         run: |
+          python3 -m unittest discover -s tools/perf -p '*_test.py' -v
+          (cd test && go test ./perf/loadgen)
           cargo build --release --locked -p ppvpn-core-lab --bin ne-mem --features ppvpn-core/lab
           mkdir -p build/perf
           (cd test && CGO_ENABLED=0 go build -trimpath -o ../build/perf/fakenode ./perf/fakenode)
           (cd test && CGO_ENABLED=0 go build -trimpath -o ../build/perf/loadgen ./perf/loadgen)
           sudo --preserve-env=GITHUB_STEP_SUMMARY sh -c 'ulimit -n 16384 && exec python3 tools/perf/ne_mem.py \
             --ne-mem target/release/ne-mem --fakenode build/perf/fakenode --loadgen build/perf/loadgen \
-            --workers 1 --variant cap --variant mobile --variant budget \
+            --workers 2 --variant cap --variant ios --variant budget \
             --out ne-mem-linux.json'
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         timeout-minutes: 10
@@ -643,13 +645,15 @@ jobs:
         if: steps.scope.outputs.memory == 'true'
         timeout-minutes: 40
         run: |
+          python3 -m unittest discover -s tools/perf -p '*_test.py' -v
+          (cd test && go test ./perf/loadgen)
           cargo build --release --locked -p ppvpn-core-lab --bin ne-mem --features ppvpn-core/lab
           mkdir -p build/perf
           (cd test && CGO_ENABLED=0 go build -trimpath -o ../build/perf/fakenode ./perf/fakenode)
           (cd test && CGO_ENABLED=0 go build -trimpath -o ../build/perf/loadgen ./perf/loadgen)
           sudo --preserve-env=GITHUB_STEP_SUMMARY sh -c 'ulimit -n 16384 && exec python3 tools/perf/ne_mem.py \
             --ne-mem target/release/ne-mem --fakenode build/perf/fakenode --loadgen build/perf/loadgen \
-            --workers 1 --variant cap --variant mobile --variant budget \
+            --workers 2 --variant cap --variant ios --variant budget \
             --out ne-mem-macos.json'
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         timeout-minutes: 10

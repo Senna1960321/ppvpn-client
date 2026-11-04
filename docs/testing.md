@@ -131,7 +131,7 @@ rust-cache 只缓存依赖，所以依赖不变时，旧缓存一直有效。Flu
 ## 不是测试层的东西
 
 - **切换前的一次性验收**：G4 弱网、G5 三端实机、G6 24 小时长跑、G9 团队自用一周。它们在测试机上（hostq）或真机上手动执行一次，结果记在 #214，不进 CI。需要 Go 0.5.21 作对照时，用 v0.5.21 Release 的二进制。
-- **性能数字**：`tools/perf`，按需在测试机上跑，不进 CI。
+- **性能数字**：`tools/perf` 的引擎对比按需在测试机上跑；其中 `ne_mem.py` 的内存测量在测试工具或 `Cargo.lock` 变化时由 Linux、macOS CI 运行，包含 iOS 的 mobile + 128 连接上限组合。负载判定与内存预算的区别见[内存测试说明](../tools/perf/README.md#network-extension-memory-388)。
 - **Sail 与 sing-box 的逐项对比（repro）**：属于 Sail 自己的 CI。本仓库只用钉住的 Sail 提交跑自己的 L1–L3。
 - **真实节点**：人工验收，见 #214 的验收清单。
 
