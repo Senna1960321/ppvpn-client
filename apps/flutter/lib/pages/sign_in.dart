@@ -14,6 +14,7 @@ import '../src/rust/api.dart' as rust;
 import '../strings.dart';
 import '../theme.dart';
 import '../widgets.dart';
+import 'diagnostics.dart';
 
 class SignInPage extends StatelessWidget {
   const SignInPage({super.key, required this.app, this.inset = Tokens.signInPadding});
@@ -123,6 +124,8 @@ class _SignedOut extends StatelessWidget {
         ),
         const SizedBox(height: 32),
         Button(kind: ButtonKind.primary, label: button, fontSize: 14, onPress: app.signIn),
+        const SizedBox(height: 8),
+        const DiagnosticsButton(),
       ],
     );
   }

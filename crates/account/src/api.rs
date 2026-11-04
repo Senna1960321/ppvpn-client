@@ -7,6 +7,7 @@
 //! Errors never carry response bodies or credentials: only the HTTP status and
 //! the backend problem `code` travel into [`ApiError`].
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use reqwest::{StatusCode, Url};
@@ -278,6 +279,7 @@ pub struct Api {
     http: reqwest::Client,
     /// No proxy: when the OS proxy cannot be reached.
     direct: reqwest::Client,
+    dns_recovery: Option<Arc<crate::service_dns::RecoveryDns>>,
     base: String,
     header_audience: Option<String>,
     token_audience: String,
@@ -314,6 +316,7 @@ pub fn is_loopback_base(base: &str) -> bool {
 impl Api {
     pub fn new(config: ApiConfig) -> Self {
         let trust_local = config.trust_local_backend && is_loopback_base(&config.base);
+        let dns_recovery = crate::service_dns::RecoveryDns::new(&config.base).map(Arc::new);
         let headers = config
             .accept_language
             .as_deref()
@@ -323,7 +326,7 @@ impl Api {
         // back to the default client instead of panicking (hosts may call
         // this across an FFI boundary).
         let builder = || {
-            reqwest::Client::builder()
+            let builder = reqwest::Client::builder()
                 .default_headers(headers.clone())
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(Duration::from_secs(20))
@@ -332,7 +335,11 @@ impl Api {
                 .pool_idle_timeout(Duration::from_secs(30))
                 // A local mock backend may use a self-signed certificate;
                 // only ever for a loopback base under the test switch.
-                .danger_accept_invalid_certs(trust_local)
+                .danger_accept_invalid_certs(trust_local);
+            match &dns_recovery {
+                Some(resolver) => builder.dns_resolver(resolver.clone()),
+                None => builder,
+            }
         };
         // The OS proxy, as the native apps' HTTP stacks used it (#476).
         let http = builder()
@@ -343,6 +350,7 @@ impl Api {
         Self {
             http,
             direct,
+            dns_recovery,
             base: config.base.trim().to_string(),
             header_audience: config.header_audience,
             token_audience: config.token_audience,
@@ -362,6 +370,15 @@ impl Api {
 
     pub fn base(&self) -> &str {
         &self.base
+    }
+
+    /// After an explicitly requested diagnostic, recover only when it proves
+    /// an alternate TLS-valid API address. This lasts for this Api instance;
+    /// it changes no system settings and stores no IP addresses.
+    pub fn recover_dns_from(&self, report: &crate::reachability::Report) -> bool {
+        self.dns_recovery
+            .as_ref()
+            .is_some_and(|dns| dns.enable_from(report))
     }
 
     /// `base` + `path`, keeping any path prefix of the base. HTTPS only,

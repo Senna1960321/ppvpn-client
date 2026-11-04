@@ -1483,6 +1483,26 @@ mod tests {
         )
     }
 
+    #[test]
+    fn reachability_detects_connection_round_trips() {
+        let (client, dir) = client("http://127.0.0.1:1", Arc::new(MemoryPlatform::default()));
+        wait_for(&client, |s| s.auth == AuthState::SignedOut);
+        client.update(|s| s.connection.phase = crate::ConnectionPhase::Off);
+        let before = client.reachability_connection();
+        assert!(!before.1);
+        client.update(|s| s.connection.phase = crate::ConnectionPhase::On);
+        let during = client.reachability_connection();
+        assert!(during.1);
+        assert_ne!(before.0, during.0);
+        client.update(|s| s.connection.phase = crate::ConnectionPhase::Off);
+        let after = client.reachability_connection();
+        assert!(!after.1);
+        assert_ne!(before.0, after.0);
+        client.shutdown();
+        drop(client);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     fn wait_for(client: &Client, what: impl Fn(&ClientSnapshot) -> bool) -> ClientSnapshot {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {

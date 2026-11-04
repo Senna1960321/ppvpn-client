@@ -15,6 +15,7 @@ import 'package:forui/forui.dart';
 import '../app_state.dart';
 import '../links.dart';
 import '../pages/sign_in.dart' show SignInError, signInError;
+import '../pages/diagnostics.dart';
 import '../src/rust/api.dart' as rust;
 import '../strings.dart';
 import '../theme.dart';
@@ -218,6 +219,8 @@ class _Panel extends StatelessWidget {
             },
             onPress: app.signIn,
           ),
+          const SizedBox(height: 8),
+          const Center(child: DiagnosticsButton()),
         ],
       );
     }

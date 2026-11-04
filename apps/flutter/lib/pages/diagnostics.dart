@@ -4,16 +4,61 @@
 // TCP and TLS (rust/src/api.rs diagnose_reachability, ppvpn-account
 // reachability). The DoH resolvers are asked only when the user presses
 // the button here; the intro says so. The report is plain text, monospace,
-// with a copy button for pasting into a ticket. It changes nothing.
+// with a copy button for pasting into a ticket. With the VPN off, a verified
+// alternate API address can enable DNS recovery for this app session; the
+// introductory text and button explain that before the user starts it.
 
 import 'dart:async';
 
 import 'package:flutter/widgets.dart';
+import 'package:forui/forui.dart';
 
 import '../src/rust/api.dart' as rust;
 import '../strings.dart';
 import '../theme.dart';
 import '../widgets.dart';
+
+/// Available before sign-in, when the API may be unreachable. Opening the
+/// explanation does not start any probes; the user must press Run inside.
+class DiagnosticsButton extends StatelessWidget {
+  const DiagnosticsButton({super.key});
+
+  @override
+  Widget build(BuildContext context) => Button(
+    kind: ButtonKind.text,
+    label: S.current('diagnostics'),
+    onPress: () => unawaited(
+      showFDialog<void>(
+        context: context,
+        builder: (context, _, animation) => FDialog(
+          animation: animation,
+          constraints: BoxConstraints(maxWidth: 640, maxHeight: MediaQuery.sizeOf(context).height * 0.8),
+          builder: (context, _) => SingleChildScrollView(
+            padding: Tokens.dialogPadding,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(S.current('diagnostics'), style: Tokens.of(context).pageTitle),
+                const SizedBox(height: 16),
+                const DiagnosticsView(),
+                const SizedBox(height: 16),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: Button(
+                    kind: ButtonKind.secondary,
+                    label: S.current('close'),
+                    onPress: () => Navigator.of(context).pop(),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+}
 
 class DiagnosticsView extends StatefulWidget {
   const DiagnosticsView({super.key});
@@ -51,7 +96,10 @@ class _DiagnosticsViewState extends State<DiagnosticsView> {
       children: [
         Text(s('diagnosticsIntro'), style: t.sub),
         const SizedBox(height: 12),
-        Row(
+        Wrap(
+          spacing: 12,
+          runSpacing: 8,
+          crossAxisAlignment: WrapCrossAlignment.center,
           children: [
             Button(
               kind: ButtonKind.primary,
@@ -59,7 +107,6 @@ class _DiagnosticsViewState extends State<DiagnosticsView> {
               label: _running ? s('diagnosticsRunning') : s('diagnosticsRun'),
               onPress: _running ? null : () => unawaited(_run()),
             ),
-            const Spacer(),
             if (report != null && !_running) CopyButton(text: report),
           ],
         ),

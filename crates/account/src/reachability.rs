@@ -9,8 +9,9 @@
 //!   host speaks TLS, whether a handshake with SNI = the host's server name
 //!   and the certificate verified against the web PKI completes.
 //!
-//! Read-only: nothing here changes how the apps resolve or connect (step B
-//! decides that from these numbers). Every connection is direct, past the
+//! The probes themselves change no settings. A host may use a user-requested
+//! report to enable API DNS recovery when it proves a usable alternative.
+//! Every connection is direct, past the
 //! OS proxy the API client honours; with the VPN on, the system routes it
 //! through the tunnel, which [`Report::vpn_on`] records.
 
@@ -174,9 +175,12 @@ pub fn profile_targets(profile: &[u8]) -> Vec<Target> {
 #[derive(Debug, Clone, Serialize)]
 pub struct Report {
     pub mode: Mode,
-    /// The VPN was on: direct connections went through the tunnel.
+    /// The VPN was active, or the host observed a connection transition
+    /// during the run: probes may have used the tunnel.
     pub vpn_on: bool,
     pub hosts: Vec<HostReport>,
+    /// The host enabled alternate API resolution for this app session.
+    pub api_dns_recovery: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -234,7 +238,13 @@ impl Report {
         };
         let _ = writeln!(out, "Resolvers: {resolvers}");
         if self.vpn_on {
-            let _ = writeln!(out, "VPN on: connections went through the tunnel");
+            let _ = writeln!(
+                out,
+                "VPN active or connection state changed: probes may have used the tunnel"
+            );
+        }
+        if self.api_dns_recovery {
+            let _ = writeln!(out, "API DNS recovery enabled for this app session: system, AliDNS, DNSPod; TLS verified");
         }
         for host in &self.hosts {
             let _ = writeln!(out, "\n{} {}:{}", host.label, host.host, host.port);
@@ -302,6 +312,7 @@ pub async fn run(targets: Vec<Target>, mode: Mode, vpn_on: bool) -> Report {
         mode,
         vpn_on,
         hosts: hosts.into_iter().map(|(_, host)| host).collect(),
+        api_dns_recovery: false,
     }
 }
 
@@ -381,7 +392,7 @@ async fn check_host(
     }
 }
 
-async fn system_lookup(host: &str, port: u16) -> Lookup {
+pub(crate) async fn system_lookup(host: &str, port: u16) -> Lookup {
     let started = Instant::now();
     let result = tokio::time::timeout(STEP_TIMEOUT, tokio::net::lookup_host((host, port))).await;
     let (addresses, error) = match result {
@@ -406,7 +417,7 @@ async fn system_lookup(host: &str, port: u16) -> Lookup {
 }
 
 /// A client for the DoH queries: direct (no OS proxy), no redirects.
-fn doh_client() -> Option<reqwest::Client> {
+pub(crate) fn doh_client() -> Option<reqwest::Client> {
     reqwest::Client::builder()
         .timeout(STEP_TIMEOUT)
         .connect_timeout(STEP_TIMEOUT)
@@ -417,7 +428,11 @@ fn doh_client() -> Option<reqwest::Client> {
 }
 
 /// A and AAAA from `resolver`, asked at once.
-async fn doh_lookup(client: &reqwest::Client, resolver: &DohResolver, host: &str) -> Lookup {
+pub(crate) async fn doh_lookup(
+    client: &reqwest::Client,
+    resolver: &DohResolver,
+    host: &str,
+) -> Lookup {
     let started = Instant::now();
     let (a, aaaa) = tokio::join!(
         doh_query(client, resolver.url, host, RecordType::A),
@@ -492,7 +507,7 @@ fn request_error(error: &reqwest::Error) -> String {
 }
 
 /// The web PKI's roots (as the API client's reqwest), ring as the provider.
-fn tls_config() -> Result<rustls::ClientConfig, String> {
+pub(crate) fn tls_config() -> Result<rustls::ClientConfig, String> {
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     Ok(rustls::ClientConfig::builder_with_provider(Arc::new(
@@ -504,7 +519,7 @@ fn tls_config() -> Result<rustls::ClientConfig, String> {
     .with_no_client_auth())
 }
 
-async fn check_address(
+pub(crate) async fn check_address(
     ip: IpAddr,
     from: Vec<String>,
     target: &Target,

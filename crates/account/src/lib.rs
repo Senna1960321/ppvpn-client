@@ -22,5 +22,6 @@ pub mod auth;
 pub mod device;
 pub mod profile;
 pub mod reachability;
+mod service_dns;
 pub mod session;
 mod sysproxy;

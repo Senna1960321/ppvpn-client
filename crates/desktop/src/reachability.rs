@@ -3,8 +3,10 @@
 //! "Network diagnostics" also asks the DoH resolvers; after a call fails to
 //! reach the backend, a run with the system resolver only (at most one per
 //! [`AUTOMATIC_INTERVAL`]) goes to the log, so the logs a user sends carry
-//! it. Nothing here changes how the client resolves or connects.
+//! it. The user's run can enable API-only DNS recovery for this session
+//! when a TLS-verified alternate works and the system's answers do not.
 
+use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -24,8 +26,14 @@ impl Client {
     /// the API host and the profile's node hosts, then TCP and TLS to each
     /// address. Logged as well. Takes up to about 15 seconds; never fails.
     pub async fn diagnose_reachability(&self) -> Report {
-        let report =
-            reachability::run(self.reachability_targets(), Mode::Compare, self.vpn_on()).await;
+        let (revision, vpn_on) = self.reachability_connection();
+        let mut report =
+            reachability::run(self.reachability_targets(), Mode::Compare, vpn_on).await;
+        // A tunnel used at any point invalidates the pre-VPN comparison.
+        // The revision also catches an Off → On → Off round trip.
+        let (after, vpn_on) = self.reachability_connection();
+        report.vpn_on |= vpn_on || revision != after;
+        report.api_dns_recovery = self.auth.api().recover_dns_from(&report);
         tracing::info!(report = %report.json(), "reachability, asked by the user");
         report
     }
@@ -71,9 +79,15 @@ impl Client {
 
     /// The tunnel may carry the probe's connections.
     fn vpn_on(&self) -> bool {
-        !matches!(
-            self.snapshot().connection.phase,
+        self.reachability_connection().1
+    }
+
+    pub(crate) fn reachability_connection(&self) -> (u64, bool) {
+        let snapshot = self.snapshot.lock().unwrap();
+        let vpn_on = !matches!(
+            snapshot.connection.phase,
             ConnectionPhase::Off | ConnectionPhase::Error
-        )
+        );
+        (self.connection_revision.load(Ordering::Relaxed), vpn_on)
     }
 }

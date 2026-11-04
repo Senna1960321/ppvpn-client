@@ -6,7 +6,7 @@
 //! platform-specific (credential storage, opening the browser, installing the
 //! privileged service) is injected through [`PlatformHooks`].
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 mod api;
@@ -588,6 +588,8 @@ pub struct Client {
     listener: Arc<dyn ClientListener>,
     runtime: tokio::runtime::Runtime,
     snapshot: Mutex<ClientSnapshot>,
+    /// Invalidates diagnostics that span a connection transition, even Off → On → Off.
+    connection_revision: AtomicU64,
     /// Last snapshot handed to the listener; identical ones are not re-sent.
     last_sent: Mutex<Option<ClientSnapshot>>,
     /// Handed to background tasks (see `session::ClientRef`).
@@ -1048,6 +1050,7 @@ impl Client {
                 runtime,
                 snapshot: Mutex::new(snapshot),
                 last_sent: Mutex::new(None),
+                connection_revision: AtomicU64::new(0),
                 this: this.clone(),
                 auth,
                 session: Mutex::new(session::SessionState::default()),
@@ -1079,7 +1082,11 @@ impl Client {
     fn update(&self, change: impl FnOnce(&mut ClientSnapshot)) {
         let snapshot = {
             let mut guard = self.snapshot.lock().unwrap();
+            let before = (guard.connection.phase, guard.connection_mode);
             change(&mut guard);
+            if before != (guard.connection.phase, guard.connection_mode) {
+                self.connection_revision.fetch_add(1, Ordering::Relaxed);
+            }
             guard.clone()
         };
         self.emit(snapshot);
