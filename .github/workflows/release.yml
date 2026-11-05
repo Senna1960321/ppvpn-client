@@ -1108,6 +1108,10 @@ jobs:
         include: ${{ fromJSON(needs.prepare.outputs.macos) }}
     runs-on: macos-15
     timeout-minutes: 90
+    env:
+      # Baked into the service with the workflow's PPVPN_SPARKLE_PUBLIC_KEY:
+      # silent updates install only newer builds (crates/service/src/update.rs).
+      PPVPN_BUILD_NUMBER: ${{ needs.prepare.outputs.build_number }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master

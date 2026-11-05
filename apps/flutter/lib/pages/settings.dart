@@ -258,8 +258,8 @@ class _LaunchAtLoginState extends State<_LaunchAtLogin> with WindowListener {
   }
 }
 
-/// The version, with 「检查更新…」 where the app checks; the
-/// automatic-check switch where it installs updates; on Linux the newer
+/// The version, with 「检查更新…」 where the app checks; the 「自动更新」
+/// switch where it installs updates (#548); on Linux the newer
 /// build's notice with the upgrade command, and how a check ended.
 class VersionSettings extends StatelessWidget {
   const VersionSettings({super.key});
@@ -372,17 +372,18 @@ class VersionSettings extends StatelessWidget {
               : const SizedBox.shrink(),
         ),
         ValueListenableBuilder(
-          valueListenable: Updates.autoCheck,
-          builder: (context, autoCheck, _) => autoCheck == null
+          valueListenable: Updates.autoUpdate,
+          builder: (context, autoUpdate, _) => autoUpdate == null
               ? const SizedBox.shrink()
               : SettingRow(
                   icon: FLucideIcons.calendarClock,
                   title: s('autoUpdate'),
+                  description: s('autoUpdateD'),
                   divider: true,
                   trailing: TriSwitch(
                     label: s('autoUpdate'),
-                    state: autoCheck ? SwitchState.on : SwitchState.off,
-                    onChanged: (enabled) => unawaited(Updates.setAutoCheck(enabled)),
+                    state: autoUpdate ? SwitchState.on : SwitchState.off,
+                    onChanged: (enabled) => unawaited(Updates.setAutoUpdate(enabled)),
                   ),
                 ),
         ),

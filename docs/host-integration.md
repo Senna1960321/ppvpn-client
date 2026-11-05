@@ -597,9 +597,10 @@ iOS 和 Android 上，引擎运行在系统要求的隧道进程里：Android �
 
 ### 16.1 分工
 
-- **应用**：照旧读更新源，把安装包下载到自己的缓存目录，在下面两种时机发 `InstallUpdate`，绝不断开连接。失败计数、回退到提示、界面文案都在应用这边（#548）。
+- **应用**：照旧读更新源，把安装包下载到自己的缓存目录，在下面三种时机发 `InstallUpdate`，绝不断开连接。失败计数、回退到提示、界面文案都在应用这边（#548）。
   - **退出时**：用户退出应用，`relaunch=false`（重新打开用户刚关掉的应用会让人意外）。应用先立刻隐藏窗口和托盘图标，再等回答；没有回答也照常退出。
   - **空闲时**：没有连接，也没有打开的窗口，只剩托盘图标。`relaunch=true`，应用收到 `accepted` 后退出。重新打开时不带参数，回到只有托盘图标的状态由应用自己处理。
+  - **启动时**：本平台的包已经下好、核对过，服务也支持（`GetVersion` 有 `build`），就在启动连接核心之前发，`relaunch=true`，收到 `accepted` 后退出；启动时不下载。没有包、服务不支持、被拒绝或没有回答时照常启动。开机自启和服务自己那次重开也算启动，所以同一个构建最多在启动时尝试一次，之后交给另外两种时机。
 - **服务**：把安装包复制到只有它能写的目录，在副本上做全部核验，等发请求的应用进程退出后安装，按需要重新打开应用，再换上新版本自己的服务。它不访问网络，也不读更新源。
 - **核验不依赖应用**：请求只能来自通过客户端身份核验的应用（`docs/security.md`），但服务不因此信任请求里的文件和版本：签名、长度和版本都在副本上自己核对。
 
@@ -626,7 +627,7 @@ iOS 和 Android 上，引擎运行在系统要求的隧道进程里：Android �
 依次检查，任何一步不过就以对应的错误码回答（`success=false`），不安装，暂存的副本删掉：
 
 1. **能不能装**：
-   - 这个构建没有编进 EdDSA 公钥（`PPVPN_SPARKLE_PUBLIC_KEY`）或构建号（`PPVPN_BUILD_NUMBER`，开发构建为 0），或者是 Linux：`UPDATE_UNSUPPORTED`。
+   - 这个构建没有编进 EdDSA 公钥（`PPVPN_SPARKLE_PUBLIC_KEY`）或构建号（`PPVPN_BUILD_NUMBER`，开发构建为 0），或者是 Linux，或者暂存目录不可信（见第 3 步和 `docs/security.md`）：`UPDATE_UNSUPPORTED`。
    - 正在停止：和其他命令一样拒绝。
    - 已经接受了一次还没装完：`UPDATE_IN_PROGRESS`。
    - 服务里有正在运行的核心（任何会话）：`UPDATE_BUSY`。
@@ -646,7 +647,7 @@ iOS 和 Android 上，引擎运行在系统要求的隧道进程里：Android �
 ### 16.4 安装
 
 - **独立进程**：安装由服务另起的进程执行，不在服务的 launchd 作业或 Windows 服务进程里，所以服务在安装中被停止、替换都不影响它。
-- **等应用退出**：等的是这条连接的对端进程，不用 payload 里的任何值：macOS 从连接的 audit token 取，Windows 用 `GetNamedPipeClientProcessId` 再打开一个进程句柄。等待挂在这个 audit token 或句柄上，所以 PID 被复用也不会认错。最多等 60 秒，还没退出就记为失败（`UPDATE_CLIENT_STILL_RUNNING`），不装。退出后再查一次没有运行中的核心，有则记为 `UPDATE_BUSY`。
+- **等应用退出**：等的是这条连接的对端进程，不用 payload 里的任何值：macOS 从连接的 audit token 取，Windows 用 `GetNamedPipeClientProcessId` 再打开一个进程句柄。等待挂在这个 audit token 或句柄上，在回答之前、连接还在时打开，所以 PID 被复用也不会认错；打不开就以 `UPDATE_INSTALL_FAILED` 回答，不接受。最多等 60 秒，还没退出就记为失败（`UPDATE_CLIENT_STILL_RUNNING`），不装。退出后再查一次没有运行中的核心，有则记为 `UPDATE_BUSY`。
 - **安装**：
   - macOS：`installer -pkg <副本> -target /`。pkg 的 postinstall 照旧把应用包交给控制台用户。成功后按 `docs/security.md` 的规则核对新应用包里的 `ppvpn-service-install`，再运行它换上新版本的服务（它会停掉旧服务，所以也在独立进程里）。
   - Windows：`<副本> /S`。安装程序自己停止、替换并重启服务。它以 SYSTEM 运行，不会自己重新打开应用。
@@ -655,7 +656,7 @@ iOS 和 Android 上，引擎运行在系统要求的隧道进程里：Android �
 - **睡眠和注销**：
   - 机器睡眠时，等待和安装的计时都暂停，唤醒后继续。
   - 用户注销时应用随之退出，安装照常进行。原来的会话已经不在时跳过重新打开，结果仍按安装本身记录。
-- **清理**：结束后删掉暂存的副本。
+- **清理**：结束后删掉暂存的副本。安装进程中途消失（例如机器在安装中重启）时，服务下次启动或回答 `GetVersion` 时记为 `UPDATE_INSTALL_FAILED:interrupted` 并清理；还在等应用退出时服务被停掉，这次请求作废，不记结果。
 
 ### 16.5 结果
 

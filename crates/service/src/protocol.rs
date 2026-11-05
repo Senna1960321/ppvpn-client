@@ -76,6 +76,13 @@ pub enum Command {
     /// A service that predates this command closes the connection without
     /// an answer.
     Watch,
+    /// Payload: an [`InstallUpdatePayload`]. Silent desktop update
+    /// (docs/host-integration.md section 16): the service copies and checks
+    /// the package, answers `{"accepted":true}` (or an `UPDATE_*` error),
+    /// then installs it once the client process has exited. The result
+    /// shows in [`VersionInfo::last_update`]. A service that predates this
+    /// command closes the connection without an answer.
+    InstallUpdate,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -300,6 +307,46 @@ pub struct VersionInfo {
     /// [`SERVICE_BUILD_ID`]; absent from older services, which
     /// clients treat as outdated.
     pub build_id: String,
+    /// The release's build number baked into this service (0 in a build
+    /// without one). This and the next two are absent from services that
+    /// predate `InstallUpdate`.
+    pub build: u64,
+    /// The silent update being installed, if any.
+    pub update: Option<UpdateProgress>,
+    /// The last silent update's result, if any.
+    pub last_update: Option<UpdateResult>,
+}
+
+/// `InstallUpdate`'s payload: the package the client downloaded and what
+/// the update feed says about it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstallUpdatePayload {
+    pub path: String,
+    pub version: String,
+    pub build: u64,
+    pub length: u64,
+    pub ed_signature: String,
+    pub relaunch: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateProgress {
+    pub version: String,
+    pub build: u64,
+    /// `waiting` (for the client to exit) or `installing`.
+    pub phase: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateResult {
+    pub version: String,
+    pub build: u64,
+    /// `installed` or `failed`.
+    pub outcome: String,
+    /// The `UPDATE_*` code of a failure (`UPDATE_INSTALL_FAILED:<detail>`
+    /// for the installer's); `None` when installed.
+    pub error: Option<String>,
+    pub finished_at_ms: u64,
 }
 
 /// SHA-256 of this service's sources (build.rs). Clients built from the same

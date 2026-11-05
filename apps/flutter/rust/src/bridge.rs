@@ -184,6 +184,17 @@ impl Bridge {
         self.fetch(f).await
     }
 
+    /// Runs `future` on the bridge's runtime (the HTTP client needs one).
+    pub(crate) async fn run<T: Send + 'static>(
+        &self,
+        future: impl std::future::Future<Output = T> + Send + 'static,
+    ) -> Result<T, String> {
+        self.runtime
+            .spawn(future)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
     /// [`Bridge::call`] for a call that returns a value.
     pub(crate) async fn fetch<T, F, Fut>(&self, f: F) -> Result<T, String>
     where

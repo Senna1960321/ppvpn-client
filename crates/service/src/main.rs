@@ -14,6 +14,7 @@ mod macdns;
 #[cfg(target_os = "macos")]
 mod macsign;
 mod protocol;
+mod update;
 mod watch;
 
 use log::info;
@@ -51,14 +52,25 @@ fn clean_up_after_previous_instance() {
     // key, so a Connect cannot race it, and `scutil` can be slow.
     #[cfg(target_os = "macos")]
     macdns::remove_leftover("service start");
+    #[cfg(target_os = "macos")]
+    update::settle_at_start();
     info!(
         "startup clean-up done in {} ms",
         started.elapsed().as_millis()
     );
 }
 
+/// The silent update's runner (see update.rs) is this binary started with
+/// `--install-update`.
+fn run_update_runner_if_asked() {
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new(update::RUNNER_FLAG)) {
+        std::process::exit(update::run_runner());
+    }
+}
+
 #[cfg(windows)]
 fn main() -> windows_service::Result<()> {
+    run_update_runner_if_asked();
     setup_logger();
     info!(
         "ppvpn-service v{} ({}) starting; logs in {}",
@@ -98,6 +110,7 @@ fn stop_data_plane() {
 
 #[cfg(not(windows))]
 fn main() {
+    run_update_runner_if_asked();
     setup_logger();
     info!(
         "ppvpn-service v{} ({}) starting (Unix privileged service); logs in {}",
@@ -253,6 +266,7 @@ mod service_module {
             },
         )?;
         let _ = STATUS.set(handle);
+        std::thread::spawn(super::update::settle_at_start);
         handle.set_service_status(ServiceStatus {
             service_type: SERVICE_TYPE,
             current_state: ServiceState::Running,

@@ -6,8 +6,8 @@ use crate::core::CORE;
 #[cfg(windows)]
 use crate::protocol::IPC_PIPE_NAME;
 use crate::protocol::{
-    Command, ConnectPayload, CoreApiPayload, HandshakePayload, HandshakeResponse, Request,
-    Response, SessionRef, UpdateProfilePayload, VersionInfo,
+    Command, ConnectPayload, CoreApiPayload, HandshakePayload, HandshakeResponse,
+    InstallUpdatePayload, Request, Response, SessionRef, UpdateProfilePayload, VersionInfo,
 };
 use anyhow::Result;
 use once_cell::sync::Lazy;
@@ -41,8 +41,8 @@ pub fn begin_stopping() {
 }
 
 /// Commands refused while stopping: Connect (including a takeover),
-/// UpdateProfile, and the calls that keep a session alive, use its core or
-/// watch it.
+/// UpdateProfile, the calls that keep a session alive, use its core or
+/// watch it, and InstallUpdate.
 /// Handshake, GetVersion, GetStatus and Disconnect still work.
 fn refused_while_stopping(command: &Command) -> bool {
     matches!(
@@ -52,6 +52,7 @@ fn refused_while_stopping(command: &Command) -> bool {
             | Command::RenewLease
             | Command::CoreApi
             | Command::Watch
+            | Command::InstallUpdate
     )
 }
 
@@ -256,10 +257,14 @@ fn handle_with(req: Request, client_pid: u32, stopping: bool) -> Result<Response
     match req.command {
         Command::Handshake => unreachable!(),
         Command::GetVersion => {
+            let (update, last_update) = crate::update::status();
             let info = VersionInfo {
                 service: "PPVPN Service".to_string(),
                 version: env!("CARGO_PKG_VERSION").to_string(),
                 build_id: crate::protocol::SERVICE_BUILD_ID.to_string(),
+                build: crate::update::build_number(),
+                update,
+                last_update,
             };
             signed_ok(req.id, serde_json::to_value(info)?, &auth.key)
         }
@@ -331,8 +336,12 @@ fn handle_with(req: Request, client_pid: u32, stopping: bool) -> Result<Response
                 Err(e) => signed_error(req.id, e.to_string(), &auth.key),
             }
         }
-        // Served by [`serve_watch`]: it needs the connection.
+        // Served by [`serve_watch`] and [`serve_install_update`]: they
+        // need the connection.
         Command::Watch => signed_error(req.id, "WATCH_NEEDS_A_CONNECTION", &auth.key),
+        Command::InstallUpdate => {
+            signed_error(req.id, "INSTALL_UPDATE_NEEDS_A_CONNECTION", &auth.key)
+        }
     }
 }
 
@@ -346,6 +355,17 @@ pub(crate) trait Connection: std::io::Read + std::io::Write {
     fn watch_closer(&self) -> Option<crate::watch::Closer> {
         None
     }
+
+    /// The client process, with a wait on its exit opened now (see
+    /// [`serve_install_update`]).
+    fn update_client(&self) -> Option<crate::update::Client> {
+        None
+    }
+
+    /// Whether the client still holds its end of the connection.
+    fn connected(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(unix)]
@@ -357,6 +377,39 @@ impl Connection for std::os::unix::net::UnixStream {
         Some(Box::new(move || {
             let _ = duplicate.shutdown(std::net::Shutdown::Both);
         }))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn update_client(&self) -> Option<crate::update::Client> {
+        crate::update::client_of_socket(self)
+    }
+
+    /// Nothing pending, or a request's bytes: connected; end of stream or
+    /// a hang-up: gone. The client never shuts down its writing half.
+    fn connected(&self) -> bool {
+        use std::os::fd::AsRawFd;
+        let mut poll = libc::pollfd {
+            fd: self.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one pollfd and one byte, both locals.
+        unsafe {
+            let ready = libc::poll(&mut poll, 1, 0);
+            if ready <= 0 {
+                return ready == 0;
+            }
+            if poll.revents & (libc::POLLHUP | libc::POLLERR) != 0 {
+                return false;
+            }
+            let mut byte = 0u8;
+            libc::recv(
+                self.as_raw_fd(),
+                (&mut byte as *mut u8).cast(),
+                1,
+                libc::MSG_PEEK | libc::MSG_DONTWAIT,
+            ) != 0
+        }
     }
 }
 
@@ -373,6 +426,28 @@ impl Connection for std::fs::File {
             winapi::um::namedpipeapi::DisconnectNamedPipe(handle);
         }))
     }
+
+    fn update_client(&self) -> Option<crate::update::Client> {
+        use std::os::windows::io::AsRawHandle;
+        crate::update::client_of_pipe(self.as_raw_handle() as winapi::shared::ntdef::HANDLE)
+    }
+
+    /// A pipe whose client closed it cannot be peeked.
+    fn connected(&self) -> bool {
+        use std::os::windows::io::AsRawHandle;
+        let mut available = 0u32;
+        // SAFETY: no buffer; one DWORD out.
+        unsafe {
+            winapi::um::namedpipeapi::PeekNamedPipe(
+                self.as_raw_handle() as winapi::shared::ntdef::HANDLE,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                &mut available,
+                std::ptr::null_mut(),
+            ) != 0
+        }
+    }
 }
 
 /// Longest a single write to a watch connection may block (Unix).
@@ -380,7 +455,8 @@ impl Connection for std::fs::File {
 const WATCH_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// One request per connection: `[u32 BE length][JSON]` in, the same out —
-/// except `Watch`, which keeps the connection open (see [`serve_watch`]).
+/// except `Watch`, which keeps the connection open (see [`serve_watch`]),
+/// and `InstallUpdate`, which needs it (see [`serve_install_update`]).
 /// Uses only `read_exact`, so it works however the client split its writes.
 fn serve_connection<S: Connection>(stream: &mut S, client_pid: u32) -> Result<()> {
     use anyhow::Context;
@@ -406,6 +482,9 @@ fn serve_connection<S: Connection>(stream: &mut S, client_pid: u32) -> Result<()
             STOPPING.load(Ordering::SeqCst),
             crate::watch::KEEPALIVE,
         );
+    }
+    if req.command == Command::InstallUpdate {
+        return serve_install_update(stream, req, client_pid, STOPPING.load(Ordering::SeqCst));
     }
     let resp = handle(req, client_pid)?;
     write_frame(stream, &resp)
@@ -493,6 +572,62 @@ fn serve_watch<S: Connection>(
             return Ok(());
         }
     }
+}
+
+/// `InstallUpdate` (docs/host-integration.md section 16): the checks, then
+/// `{"accepted":true}` and the install once the client process exits. The
+/// wait on that process is opened while the client still holds the
+/// connection, so a reused pid is never taken for it; a client gone before
+/// the answer gets nothing installed and nothing recorded.
+fn serve_install_update<S: Connection>(
+    stream: &mut S,
+    req: Request,
+    client_pid: u32,
+    stopping: bool,
+) -> Result<()> {
+    let auth = match admit(&req, client_pid, stopping)? {
+        Admission::Authorized(auth) => auth,
+        Admission::Refused(response) => return write_frame(stream, &response),
+        Admission::Handshake => unreachable!("an InstallUpdate request"),
+    };
+    let payload: InstallUpdatePayload = match serde_json::from_value(req.payload.clone()) {
+        Ok(payload) => payload,
+        Err(error) => {
+            let response = signed_error(req.id, format!("bad payload: {error}"), &auth.key)?;
+            return write_frame(stream, &response);
+        }
+    };
+    log::info!(
+        "InstallUpdate of {} ({}) from pid {client_pid}",
+        payload.version,
+        payload.build
+    );
+    let staged = match crate::update::check(payload, &core_running) {
+        Ok(staged) => staged,
+        Err(code) => return write_frame(stream, &signed_error(req.id, code, &auth.key)?),
+    };
+    let client = stream.update_client();
+    if !stream.connected() {
+        staged.discard("the client went away");
+        return Ok(());
+    }
+    let Some(client) = client else {
+        staged.discard("the client process cannot be waited on");
+        let response = signed_error(req.id, crate::update::INSTALL_FAILED, &auth.key)?;
+        return write_frame(stream, &response);
+    };
+    let accepted = signed_ok(req.id, serde_json::json!({ "accepted": true }), &auth.key)?;
+    if let Err(error) = write_frame(stream, &accepted) {
+        staged.discard(&format!("the answer did not reach the client: {error:#}"));
+        return Ok(());
+    }
+    staged.start(client, core_running);
+    Ok(())
+}
+
+/// Whether a core runs, for any session.
+fn core_running() -> bool {
+    CORE.lock().has_core()
 }
 
 fn handshake(req: Request, client_pid: u32) -> Result<Response> {
@@ -808,8 +943,10 @@ fn validate_windows_client(pipe_handle: winapi::shared::ntdef::HANDLE) -> Result
     Ok(process_id)
 }
 
+/// WinVerifyTrust and the publisher pin; also used on update packages
+/// (crate::update).
 #[cfg(windows)]
-fn verify_authenticode(path: &std::path::Path) -> Result<()> {
+pub(crate) fn verify_authenticode(path: &std::path::Path) -> Result<()> {
     use anyhow::anyhow;
     use std::ffi::OsStr;
     use std::mem;
@@ -1181,13 +1318,12 @@ fn prepare_macos_socket_directory() -> Result<()> {
     Ok(())
 }
 
+/// The socket peer's audit token (`LOCAL_PEERTOKEN`): its words 1 and 5
+/// are the euid and the pid.
 #[cfg(target_os = "macos")]
-fn validate_macos_client(stream: &std::os::unix::net::UnixStream) -> Result<u32> {
-    use anyhow::anyhow;
+pub(crate) fn peer_audit_token(stream: &std::os::unix::net::UnixStream) -> Option<[u32; 8]> {
     use std::os::fd::AsRawFd;
 
-    // The audit token names the peer process itself (pid and pid version),
-    // so the signature checked is the one of the process that connected.
     let mut token = [0u32; 8];
     let mut length = std::mem::size_of_val(&token) as libc::socklen_t;
     let result = unsafe {
@@ -1199,10 +1335,18 @@ fn validate_macos_client(stream: &std::os::unix::net::UnixStream) -> Result<u32>
             &mut length,
         )
     };
+    let valid = result == 0 && length as usize == std::mem::size_of_val(&token) && token[5] > 0;
+    valid.then_some(token)
+}
+
+#[cfg(target_os = "macos")]
+fn validate_macos_client(stream: &std::os::unix::net::UnixStream) -> Result<u32> {
+    use anyhow::anyhow;
+
+    // The audit token names the peer process itself (pid and pid version),
+    // so the signature checked is the one of the process that connected.
+    let token = peer_audit_token(stream).ok_or_else(|| anyhow!("CLIENT_PID_UNAVAILABLE"))?;
     let pid = token[5] as libc::pid_t;
-    if result != 0 || length as usize != std::mem::size_of_val(&token) || pid <= 0 {
-        return Err(anyhow!("CLIENT_PID_UNAVAILABLE"));
-    }
     let bytes: Vec<u8> = token.iter().flat_map(|word| word.to_ne_bytes()).collect();
     let requirement = crate::macsign::client_requirement(crate::macsign::team_id())?;
     match crate::macsign::check_process(&bytes, &requirement) {
@@ -1225,7 +1369,7 @@ fn validate_macos_client(stream: &std::os::unix::net::UnixStream) -> Result<u32>
 }
 
 #[cfg(target_os = "macos")]
-fn macos_process_path(pid: libc::pid_t) -> Result<String> {
+pub(crate) fn macos_process_path(pid: libc::pid_t) -> Result<String> {
     use anyhow::{anyhow, Context};
     use std::ffi::CStr;
 
@@ -1673,6 +1817,81 @@ mod tests {
                 Some(SERVICE_STOPPING),
                 "{command:?}"
             );
+        }
+    }
+
+    // --- InstallUpdate ------------------------------------------------------
+
+    /// One signed request through `serve_connection`, its answer read back.
+    fn over_a_connection(
+        pid: u32,
+        command: Command,
+        payload: serde_json::Value,
+        stopping: bool,
+    ) -> crate::protocol::Response {
+        let (token, key) = authenticate(pid);
+        let request = Request::signed(
+            uuid::Uuid::new_v4().to_string(),
+            command,
+            payload,
+            Some(token),
+            &key,
+        )
+        .unwrap();
+        let mut stream = FakeStream {
+            input: Vec::new(),
+            position: 0,
+            chunk: usize::MAX,
+            output: Vec::new(),
+        };
+        if stopping {
+            super::serve_install_update(&mut stream, request, pid, true).unwrap();
+        } else {
+            let body = serde_json::to_vec(&request).unwrap();
+            stream.input = (body.len() as u32).to_be_bytes().to_vec();
+            stream.input.extend_from_slice(&body);
+            super::serve_connection(&mut stream, pid).unwrap();
+        }
+        let length = u32::from_be_bytes(stream.output[..4].try_into().unwrap()) as usize;
+        assert_eq!(stream.output.len(), 4 + length);
+        let response: crate::protocol::Response =
+            serde_json::from_slice(&stream.output[4..]).unwrap();
+        assert!(response.verify_with(&key).unwrap(), "signed");
+        response
+    }
+
+    #[test]
+    fn install_update_is_answered_with_its_error_codes() {
+        let package = serde_json::json!({
+            "path": "/nonexistent/PPVPN.pkg", "version": "0.7.5", "build": 1_000_000,
+            "length": 10, "ed_signature": "", "relaunch": false,
+        });
+        let stopping = over_a_connection(6161, Command::InstallUpdate, package.clone(), true);
+        assert_eq!(stopping.error.as_deref(), Some(SERVICE_STOPPING));
+
+        let bad = over_a_connection(6162, Command::InstallUpdate, serde_json::json!({}), false);
+        assert!(!bad.success);
+        assert!(bad.error.unwrap().starts_with("bad payload"));
+
+        // CI builds bake in no update key or build number.
+        if crate::update::build_number() == 0 {
+            let unsupported = over_a_connection(6163, Command::InstallUpdate, package, false);
+            assert!(!unsupported.success);
+            assert_eq!(
+                unsupported.error.as_deref(),
+                Some(crate::update::UNSUPPORTED)
+            );
+        }
+    }
+
+    #[test]
+    fn get_version_reports_the_build_and_the_updates() {
+        let response = over_a_connection(6164, Command::GetVersion, serde_json::json!({}), false);
+        assert!(response.success);
+        let data = response.data.unwrap();
+        assert_eq!(data["build"], crate::update::build_number());
+        for key in ["update", "last_update"] {
+            assert!(data.get(key).is_some(), "{key} is always there");
         }
     }
 
