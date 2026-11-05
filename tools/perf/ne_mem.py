@@ -372,6 +372,8 @@ def failure(row):
             completed = load.get("completed_echoes", 0)
             if completed < required:
                 return f"{completed} complete echoes; need {required}"
+            if completed > 128:
+                return f"{completed} complete echoes exceed the iOS cap of 128"
         if "error" in load or load.get("failed_connections"):
             return f"{load.get('failed_connections', '?')} connections failed"
         if load.get("stalled_connections"):
@@ -398,7 +400,7 @@ def expected_ios_refusal(row):
     requested = int(label.removeprefix("conns"))
     load = row.get("load", {})
     return (requested > 128 and "error" not in load
-            and load.get("completed_echoes", 0) >= 128
+            and load.get("completed_echoes", 0) == 128
             and not load.get("stalled_connections", 0)
             and load.get("failed_connections", 0) <= requested - 128)
 

@@ -126,6 +126,16 @@ class RequiredLoadsTest(unittest.TestCase):
             complete = row(label=f"conns{requested}", completed_echoes=min(requested, 128))
             self.assertEqual(ne_mem.failed_loads([complete], "ios"), [])
 
+    def test_missing_cap_cannot_pass_as_the_ios_variant(self):
+        # A binary built without ppvpn-core/lab ignores variant settings.
+        # Its otherwise successful uncapped load is not the iOS workload.
+        for requested, completed in ((250, 129), (250, 250), (500, 500)):
+            with self.subTest(requested=requested, completed=completed):
+                uncapped = row(label=f"conns{requested}", connections=requested,
+                               completed_echoes=completed)
+                self.assertIsNotNone(uncapped["failed"])
+                self.assertEqual(ne_mem.failed_loads([uncapped], "ios"), [uncapped])
+
     def test_short_echo_at_or_below_cap_is_a_failure(self):
         for label in ("conns100", "conns128", "download_ss", "switch"):
             failed = row(label=label, bytes_received=500)
