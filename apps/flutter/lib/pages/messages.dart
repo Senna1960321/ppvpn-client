@@ -111,6 +111,16 @@ class _MessagesPageState extends State<MessagesPage> {
         _open = null;
         _push = request.push;
       });
+      // A team/account reset can keep this page mounted. Its cleared list
+      // needs a fresh load because initState will not run again.
+      final view = messages.view.value;
+      if (id == null &&
+          request.push == null &&
+          !view.loaded &&
+          !view.loading &&
+          widget.app.snapshot.value.auth == rust.UiAuth.signedIn) {
+        unawaited(messages.reload());
+      }
     }
   }
 
