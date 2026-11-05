@@ -313,7 +313,12 @@ DNS_PORT = 53
 def dns_burst(count, rate=400):
     """count A queries for distinct names under example.net, through the
     TUN's DNS (any address port 53 is hijacked), rate a second; returns the
-    answers that came back."""
+    completed resolutions (including NXDOMAIN) that came back."""
+    questions = []
+    for i in range(count):
+        name = f"n{i}-{os.getpid()}.example.net"
+        questions.append(b"".join(bytes([len(p)]) + p.encode() for p in name.split("."))
+                         + b"\0" + struct.pack(">HH", 1, 1))
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.settimeout(0.2)
     answered = set()
@@ -326,8 +331,15 @@ def dns_burst(count, rate=400):
                 data, _ = sock.recvfrom(4096)
                 if len(data) < 12:
                     continue
-                query_id, flags = struct.unpack(">HH", data[:4])
-                if flags & 0x8000 and query_id < count:
+                query_id, flags, qdcount = struct.unpack(">HHH", data[:6])
+                # Random names may legitimately be NXDOMAIN. SERVFAIL,
+                # REFUSED, truncation and unrelated replies are not a
+                # successful DNS load, even when the response ID matches.
+                if (flags & 0x8000 and not (flags & 0x7A00)
+                        and (flags & 0xF) in (0, 3) and qdcount == 1
+                        and query_id < count
+                        and data[12:12 + len(questions[query_id])].lower()
+                        == questions[query_id]):
                     answered.add(query_id)
                     if len(answered) == count:
                         complete.set()
@@ -335,11 +347,9 @@ def dns_burst(count, rate=400):
                 pass
     t = threading.Thread(target=receive, daemon=True)
     t.start()
-    for i in range(count):
-        name = f"n{i}-{os.getpid()}.example.net"
+    for i, question in enumerate(questions):
         q = struct.pack(">HHHHHH", i & 0xFFFF, 0x0100, 1, 0, 0, 0)
-        q += b"".join(bytes([len(p)]) + p.encode() for p in name.split(".")) + b"\0"
-        q += struct.pack(">HH", 1, 1)
+        q += question
         sock.sendto(q, (DNS_IP, DNS_PORT))
         time.sleep(1 / rate)
     # The old 5s cut-off counted queries still within the core's 10s

@@ -11,23 +11,30 @@ import ne_mem
 
 
 class DnsBurstTest(unittest.TestCase):
-    def burst(self, finish):
+    def burst(self, finish, flags=0x8180, wrong_question=False, upper_question=False):
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as server:
             server.bind(("127.0.0.1", 0))
             server.settimeout(2)
 
             def respond():
                 queries = [server.recvfrom(4096) for _ in range(2)]
+                def reply(data):
+                    packet = data[:2] + struct.pack(">H", flags) + data[4:]
+                    if wrong_question:
+                        packet = packet[:13] + b"x" + packet[14:]
+                    if upper_question:
+                        packet = packet[:12] + packet[12:].upper()
+                    return packet
+
                 data, peer = queries[0]
-                reply = data[:2] + b"\x81\x80" + data[4:]
-                server.sendto(reply, peer)
-                server.sendto(reply, peer)  # duplicates are not more answers
+                server.sendto(reply(data), peer)
+                server.sendto(reply(data), peer)  # duplicates are not more answers
                 server.sendto(struct.pack(">HHHHHH", 99, 0x8180, 0, 0, 0, 0), peer)
                 server.sendto(b"short", peer)
                 if finish:
                     time.sleep(0.08)
                     data, peer = queries[1]
-                    server.sendto(data[:2] + b"\x81\x80" + data[4:], peer)
+                    server.sendto(reply(data), peer)
 
             worker = threading.Thread(target=respond)
             worker.start()
@@ -45,6 +52,25 @@ class DnsBurstTest(unittest.TestCase):
 
     def test_duplicates_cannot_hide_a_missing_response(self):
         self.assertEqual(self.burst(False), 1)
+
+    def test_dns_errors_do_not_count_as_completed_resolutions(self):
+        for rcode in (1, 2, 4, 5):
+            with self.subTest(rcode=rcode):
+                self.assertEqual(self.burst(True, flags=0x8180 | rcode), 0)
+
+    def test_nxdomain_is_a_completed_resolution(self):
+        self.assertEqual(self.burst(True, flags=0x8183), 2)
+
+    def test_truncated_or_non_query_responses_do_not_complete_the_load(self):
+        for flags in (0x8380, 0x8980):
+            with self.subTest(flags=flags):
+                self.assertEqual(self.burst(True, flags=flags), 0)
+
+    def test_a_matching_id_for_another_question_does_not_count(self):
+        self.assertEqual(self.burst(True, wrong_question=True), 0)
+
+    def test_question_names_are_case_insensitive(self):
+        self.assertEqual(self.burst(True, upper_question=True), 2)
 
 
 def row(variant="ios", label="download_anytls", **load):
