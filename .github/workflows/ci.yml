@@ -808,7 +808,9 @@ jobs:
       FRB_CODEGEN_VERSION: 2.13.0
       # The backend the app is built for (#517): the GitHub variable, as
       # release.yml's; ci-build.sh fails without it.
-      PPVPN_API_BASE_DEFAULT: ${{ vars.PPVPN_API_BASE }}
+      # Fork PR smoke tests use mock backends and may lack this variable.
+      # Release builds still require their configured backend.
+      PPVPN_API_BASE_DEFAULT: ${{ vars.PPVPN_API_BASE || 'https://api.example.invalid' }}
     defaults:
       run:
         shell: bash
@@ -1151,7 +1153,7 @@ jobs:
       FRB_CODEGEN_VERSION: 2.13.0
       # The backend the app is built for (#517): the GitHub variable, as
       # release.yml's; ci-build.sh fails without it.
-      PPVPN_API_BASE_DEFAULT: ${{ vars.PPVPN_API_BASE }}
+      PPVPN_API_BASE_DEFAULT: ${{ vars.PPVPN_API_BASE || 'https://api.example.invalid' }}
     defaults:
       run:
         shell: bash
@@ -1289,7 +1291,7 @@ jobs:
       FRB_CODEGEN_VERSION: 2.13.0
       # The backend the app is built for (#517): the GitHub variable, as
       # release.yml's; ci-build.sh fails without it.
-      PPVPN_API_BASE_DEFAULT: ${{ vars.PPVPN_API_BASE }}
+      PPVPN_API_BASE_DEFAULT: ${{ vars.PPVPN_API_BASE || 'https://api.example.invalid' }}
     defaults:
       run:
         shell: bash
