@@ -3241,6 +3241,10 @@ mod tests {
         available: AtomicBool,
         connect_error: Mutex<Option<String>>,
         update_error: Mutex<Option<String>>,
+        /// Reject a specific requested mode, leaving other updates valid.
+        reject_routing: Mutex<Option<RoutingMode>>,
+        /// Hold the next profile update after recording its requested mode.
+        update_gate: Mutex<Option<Arc<tokio::sync::Notify>>>,
         /// Another session owns the core (for restore tests).
         foreign: Mutex<Option<SessionRef>>,
         owner: Mutex<Option<(SessionRef, String)>>,
@@ -3425,8 +3429,17 @@ mod tests {
             Box::pin(async move {
                 self.check()?;
                 self.routing_modes.lock().unwrap().push(routing_mode);
+                let gate = self.update_gate.lock().unwrap().take();
+                if let Some(gate) = gate {
+                    gate.notified().await;
+                }
                 if let Some(error) = self.update_error.lock().unwrap().clone() {
                     return Err(ServiceError::Failed(error));
+                }
+                if *self.reject_routing.lock().unwrap() == Some(routing_mode) {
+                    return Err(ServiceError::Failed(
+                        "PROFILE_UPDATE_ROLLED_BACK: invalid routing mode".into(),
+                    ));
                 }
                 let revision = profile["revision"].as_str().unwrap_or_default().to_string();
                 *self.owner.lock().unwrap() = Some((session.clone(), revision));
@@ -3910,6 +3923,338 @@ mod tests {
 
     fn captured(buffer: &Arc<Mutex<Vec<u8>>>) -> String {
         String::from_utf8_lossy(&buffer.lock().unwrap()).into_owned()
+    }
+
+    // Exercise the public client action as well as the enhanced controller:
+    // the standard core may already have accepted a mode that the service rejects.
+    struct RoutingHarness {
+        client: Arc<crate::Client>,
+        service: Arc<FakeService>,
+        launcher: Arc<crate::cores::test_support::FakeLauncher>,
+        dir: String,
+    }
+
+    impl Drop for RoutingHarness {
+        fn drop(&mut self) {
+            self.client.shutdown();
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn routing_client() -> RoutingHarness {
+        struct Listener;
+        impl crate::ClientListener for Listener {
+            fn on_snapshot(&self, _: crate::ClientSnapshot) {}
+            fn on_probe_result(&self, _: crate::ProbeResult) {}
+            fn on_traffic(&self, _: crate::TrafficSample) {}
+        }
+        let backend = crate::test_backend::Backend::new();
+        *backend.profile.lock().unwrap() =
+            Some(include_str!("../../account/tests/fixtures/proxy-profile.json").into());
+        let base = crate::test_backend::serve(backend);
+        let dir = crate::test_backend::temp_dir("ppvpn-routing-client");
+        let service = Arc::new(FakeService::default());
+        service.available.store(true, Ordering::SeqCst);
+        let launcher = crate::cores::test_support::FakeLauncher::new();
+        let client = crate::Client::with_parts(
+            crate::ClientConfig {
+                api_base: base,
+                data_dir: dir.clone(),
+                log_dir: dir.clone(),
+                platform: "macos".into(),
+                app_version: "0.0.0-test".into(),
+            },
+            crate::auth::test_support::MemoryPlatform::with_blob(
+                r#"{"version":1,"active_refresh":"jyr_old"}"#,
+            ),
+            Arc::new(Listener),
+            service.clone(),
+            launcher.clone(),
+            launcher.writer.clone(),
+        );
+        crate::test_backend::wait_until(|| {
+            matches!(
+                client.snapshot().standard,
+                crate::StandardState::Ready { .. }
+            )
+        });
+        client.runtime.block_on(client.connect_now()).unwrap();
+        assert_eq!(client.snapshot().connection.phase, ConnectionPhase::On);
+        RoutingHarness {
+            client,
+            service,
+            launcher,
+            dir,
+        }
+    }
+
+    #[test]
+    fn routing_failure_restores_client_and_standard_mode_and_allows_retry() {
+        let h = routing_client();
+        *h.service.reject_routing.lock().unwrap() = Some(RoutingMode::Global);
+        h.client
+            .runtime
+            .block_on(h.client.set_routing_mode(RoutingMode::Global))
+            .unwrap_err();
+        assert_eq!(h.client.snapshot().routing_mode, RoutingMode::Rules);
+        assert_eq!(h.client.routing.get(), RoutingMode::Rules);
+        assert_eq!(
+            crate::connection::load_routing_mode(&h.dir),
+            RoutingMode::Rules
+        );
+        let standard_modes: Vec<_> = h
+            .launcher
+            .core
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(path, _)| path == "/v1/apply-profile")
+            .map(|(_, body)| body["routing_mode"].clone())
+            .collect();
+        assert_eq!(
+            standard_modes,
+            vec![
+                serde_json::json!("rules"),
+                serde_json::json!("global"),
+                serde_json::json!("rules")
+            ]
+        );
+        assert_eq!(h.client.snapshot().connection.phase, ConnectionPhase::On);
+        *h.service.reject_routing.lock().unwrap() = None;
+        h.client
+            .runtime
+            .block_on(h.client.set_routing_mode(RoutingMode::Global))
+            .unwrap();
+        assert_eq!(h.client.snapshot().routing_mode, RoutingMode::Global);
+        assert_eq!(
+            crate::connection::load_routing_mode(&h.dir),
+            RoutingMode::Global
+        );
+        assert_eq!(
+            h.service.routing_modes.lock().unwrap().last(),
+            Some(&RoutingMode::Global)
+        );
+        assert_eq!(h.service.connects.load(Ordering::SeqCst), 1, "no reconnect");
+    }
+
+    #[test]
+    fn routing_standard_failure_does_not_change_the_tunnel() {
+        let h = routing_client();
+        h.launcher.fail_apply.store(true, Ordering::SeqCst);
+        h.client
+            .runtime
+            .block_on(h.client.set_routing_mode(RoutingMode::Global))
+            .unwrap_err();
+        assert_eq!(h.client.routing.get(), RoutingMode::Rules);
+        assert_eq!(h.client.snapshot().routing_mode, RoutingMode::Rules);
+        assert_eq!(
+            crate::connection::load_routing_mode(&h.dir),
+            RoutingMode::Rules
+        );
+        assert_eq!(
+            *h.service.routing_modes.lock().unwrap(),
+            [RoutingMode::Rules, RoutingMode::Rules]
+        );
+        h.launcher.fail_apply.store(false, Ordering::SeqCst);
+        h.client
+            .runtime
+            .block_on(h.client.set_routing_mode(RoutingMode::Global))
+            .unwrap();
+        assert_eq!(
+            *h.service.routing_modes.lock().unwrap(),
+            [RoutingMode::Rules, RoutingMode::Rules, RoutingMode::Global]
+        );
+    }
+
+    #[test]
+    fn routing_save_failure_restores_both_running_cores() {
+        let h = routing_client();
+        // A directory at the destination makes atomic rename fail on every OS.
+        let settings = PathBuf::from(&h.dir).join(crate::storage::CLIENT_SETTINGS_FILE);
+        std::fs::create_dir(&settings).unwrap();
+        let error = h
+            .client
+            .runtime
+            .block_on(h.client.set_routing_mode(RoutingMode::Global))
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ClientError::Failed {
+                code: ErrorCode::LocalStorageFailed,
+                ..
+            }
+        ));
+        assert_eq!(h.client.routing.get(), RoutingMode::Rules);
+        assert_eq!(h.client.snapshot().routing_mode, RoutingMode::Rules);
+        assert_eq!(
+            *h.service.routing_modes.lock().unwrap(),
+            [RoutingMode::Rules, RoutingMode::Global, RoutingMode::Rules]
+        );
+        assert_eq!(h.client.snapshot().connection.phase, ConnectionPhase::On);
+        std::fs::remove_dir(settings).unwrap();
+        h.client
+            .runtime
+            .block_on(h.client.set_routing_mode(RoutingMode::Global))
+            .unwrap();
+        assert_eq!(
+            crate::connection::load_routing_mode(&h.dir),
+            RoutingMode::Global
+        );
+        // A confirmed mode is still a genuine no-op.
+        let updates = h.service.routing_modes.lock().unwrap().len();
+        h.client
+            .runtime
+            .block_on(h.client.set_routing_mode(RoutingMode::Global))
+            .unwrap();
+        assert_eq!(h.service.routing_modes.lock().unwrap().len(), updates);
+    }
+
+    #[test]
+    fn routing_failed_compensation_stops_the_mismatched_cores() {
+        let h = routing_client();
+        *h.launcher.reject_routing.lock().unwrap() = Some(RoutingMode::Rules);
+        *h.service.reject_routing.lock().unwrap() = Some(RoutingMode::Global);
+        h.client
+            .runtime
+            .block_on(h.client.set_routing_mode(RoutingMode::Global))
+            .unwrap_err();
+        assert_eq!(h.client.routing.get(), RoutingMode::Rules);
+        assert_eq!(h.client.snapshot().routing_mode, RoutingMode::Rules);
+        assert_eq!(h.client.snapshot().connection.phase, ConnectionPhase::Off);
+        assert!(
+            h.client.standard.transport().is_err(),
+            "standard core must not keep routing globally"
+        );
+        assert!(h.service.owner.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn routing_fatal_tunnel_failure_is_not_mistaken_for_a_noop_rollback() {
+        let h = routing_client();
+        *h.service.update_error.lock().unwrap() =
+            Some("PROFILE_UPDATE_AND_ROLLBACK_FAILED: runtime unavailable".into());
+        h.client
+            .runtime
+            .block_on(h.client.set_routing_mode(RoutingMode::Global))
+            .unwrap_err();
+        assert_eq!(h.client.snapshot().routing_mode, RoutingMode::Rules);
+        assert_eq!(h.client.snapshot().connection.phase, ConnectionPhase::Off);
+        assert!(h.service.owner.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn routing_waits_for_acceptance_and_survives_caller_cancellation() {
+        let h = routing_client();
+        let gate = Arc::new(tokio::sync::Notify::new());
+        *h.service.update_gate.lock().unwrap() = Some(gate.clone());
+        let client = h.client.clone();
+        let request = h
+            .client
+            .runtime
+            .spawn(async move { client.set_routing_mode(RoutingMode::Global).await });
+        crate::test_backend::wait_until(|| h.service.routing_modes.lock().unwrap().len() == 2);
+        assert_eq!(
+            h.client.snapshot().routing_mode,
+            RoutingMode::Rules,
+            "unconfirmed mode is not published"
+        );
+        assert_eq!(
+            crate::connection::load_routing_mode(&h.dir),
+            RoutingMode::Rules,
+            "unconfirmed mode is not saved"
+        );
+        request.abort();
+        assert!(h
+            .client
+            .runtime
+            .block_on(request)
+            .unwrap_err()
+            .is_cancelled());
+        gate.notify_one();
+        crate::test_backend::wait_until(|| h.client.snapshot().routing_mode == RoutingMode::Global);
+        assert_eq!(
+            crate::connection::load_routing_mode(&h.dir),
+            RoutingMode::Global
+        );
+        assert_eq!(h.client.routing.get(), RoutingMode::Global);
+    }
+
+    #[test]
+    fn routing_reverse_switch_restores_global_and_can_retry_rules() {
+        let h = routing_client();
+        h.client
+            .runtime
+            .block_on(h.client.set_routing_mode(RoutingMode::Global))
+            .unwrap();
+        *h.service.reject_routing.lock().unwrap() = Some(RoutingMode::Rules);
+        h.client
+            .runtime
+            .block_on(h.client.set_routing_mode(RoutingMode::Rules))
+            .unwrap_err();
+        assert_eq!(h.client.snapshot().routing_mode, RoutingMode::Global);
+        assert_eq!(h.client.routing.get(), RoutingMode::Global);
+        assert_eq!(
+            crate::connection::load_routing_mode(&h.dir),
+            RoutingMode::Global
+        );
+        assert_eq!(h.client.snapshot().connection.phase, ConnectionPhase::On);
+        *h.service.reject_routing.lock().unwrap() = None;
+        h.client
+            .runtime
+            .block_on(h.client.set_routing_mode(RoutingMode::Rules))
+            .unwrap();
+        assert_eq!(h.client.snapshot().routing_mode, RoutingMode::Rules);
+        assert_eq!(
+            crate::connection::load_routing_mode(&h.dir),
+            RoutingMode::Rules
+        );
+    }
+
+    #[test]
+    fn routing_tunnel_compensation_failure_stops_the_connection() {
+        let h = routing_client();
+        *h.service.update_error.lock().unwrap() =
+            Some("PROFILE_UPDATE_ROLLED_BACK: all updates unavailable".into());
+        h.client
+            .runtime
+            .block_on(h.client.set_routing_mode(RoutingMode::Global))
+            .unwrap_err();
+        assert_eq!(h.client.snapshot().routing_mode, RoutingMode::Rules);
+        assert_eq!(h.client.snapshot().connection.phase, ConnectionPhase::Off);
+        assert!(h.service.owner.lock().unwrap().is_none());
+        assert!(h.client.standard.transport().is_err());
+    }
+
+    #[test]
+    fn routing_lost_standard_reply_forces_the_old_mode_back_to_the_core() {
+        let h = routing_client();
+        *h.launcher.lose_apply_reply.lock().unwrap() = Some(RoutingMode::Global);
+        h.client
+            .runtime
+            .block_on(h.client.set_routing_mode(RoutingMode::Global))
+            .unwrap_err();
+        let modes: Vec<_> = h
+            .launcher
+            .core
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(path, _)| path == "/v1/apply-profile")
+            .map(|(_, body)| body["routing_mode"].clone())
+            .collect();
+        assert_eq!(
+            modes,
+            vec![
+                serde_json::json!("rules"),
+                serde_json::json!("global"),
+                serde_json::json!("rules")
+            ]
+        );
+        assert_eq!(h.client.snapshot().routing_mode, RoutingMode::Rules);
+        assert_eq!(h.client.routing.get(), RoutingMode::Rules);
+        assert_eq!(h.client.snapshot().connection.phase, ConnectionPhase::On);
     }
 
     #[tokio::test]

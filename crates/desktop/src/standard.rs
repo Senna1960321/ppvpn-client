@@ -407,6 +407,15 @@ impl Inner {
         )
         .await
         {
+            // A lost response can follow a successful remote apply. Do not
+            // let the old cached mode turn compensation into a no-op.
+            if matches!(&error, core_ipc::CoreCallError::Transport(_)) {
+                if let Ok(mut slot) = self.slot.lock() {
+                    if let Some(running) = slot.running.as_mut() {
+                        running.applied_mode = None;
+                    }
+                }
+            }
             let info = error.info(ErrorCode::StandardCoreFailed);
             return Err(match (started, applied) {
                 // The previous revision keeps serving; report without
