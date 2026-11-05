@@ -85,7 +85,13 @@ class AppState {
     var previous = snapshot.value;
     snapshot.addListener(() {
       final next = snapshot.value;
-      if (previous.auth != next.auth || previous.accountName != next.accountName || previous.teamId != next.teamId) {
+      // Restoration publishes SignedIn before loading the account and team.
+      // Initial metadata keeps the same session and any cold-launch tap;
+      // auth changes or leaving an established account/team still clear it.
+      final accountChanged = previous.auth != next.auth ||
+          (previous.accountName != null && previous.accountName != next.accountName);
+      final teamChanged = previous.teamId != null && previous.teamId != next.teamId;
+      if (accountChanged || teamChanged) {
         messages.clear();
       }
       previous = next;
