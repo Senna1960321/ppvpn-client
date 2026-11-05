@@ -1,0 +1,152 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 7364aa8..ac76ff0 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -448 +448 @@ name = "bindgen"
+-version = "0.72.1"
++version = "0.73.2"
+@@ -450 +450 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "993776b509cfb49c750f11b8f07a46fa23e0a1386ffc01fb1e7d343efc387895"
++checksum = "787ef8ef523575546b106a58213d6e6b06198a05c2f757258c68a74273670cfa"
+@@ -455 +454,0 @@ dependencies = [
+- "itertools",
+@@ -460 +459 @@ dependencies = [
+- "shlex 1.3.0",
++ "shlex",
+@@ -557 +556 @@ version = "0.5.6"
+-source = "git+https://github.com/peakpassvpn/btls.git?rev=c0fb9dd9f610d0f76ae2b5afb30d65dce9b5e74c#c0fb9dd9f610d0f76ae2b5afb30d65dce9b5e74c"
++source = "git+https://github.com/peakpassvpn/btls.git?rev=132da2caff5d94c0f9ea52aa82bbc170bf2baaa6#132da2caff5d94c0f9ea52aa82bbc170bf2baaa6"
+@@ -569 +568 @@ version = "0.5.6"
+-source = "git+https://github.com/peakpassvpn/btls.git?rev=c0fb9dd9f610d0f76ae2b5afb30d65dce9b5e74c#c0fb9dd9f610d0f76ae2b5afb30d65dce9b5e74c"
++source = "git+https://github.com/peakpassvpn/btls.git?rev=132da2caff5d94c0f9ea52aa82bbc170bf2baaa6#132da2caff5d94c0f9ea52aa82bbc170bf2baaa6"
+@@ -655 +654 @@ dependencies = [
+- "shlex 2.0.1",
++ "shlex",
+@@ -1938,9 +1936,0 @@ checksum = "cf370abdafd54d13e54a620e8c3e1145f28e46cc9d704bc6d94414559df41763"
+-[[package]]
+-name = "itertools"
+-version = "0.13.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "413ee7dfc52ee1a4949ceeb7dbc8a33f2d6c088194d9f922fb8318faf1f01186"
+-dependencies = [
+- "either",
+-]
+-
+@@ -2298 +2288,2 @@ version = "0.1.6"
+-source = "git+https://github.com/peakpassvpn/netconfig-rs.git?rev=c4186a6416cce1b66ca65200b7a23b5e859181d7#c4186a6416cce1b66ca65200b7a23b5e859181d7"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "733ad7a1352f0748a620368f2ea5cd94f0e449c5108fbac86ace31df1601bf6f"
+@@ -2304,3 +2295,3 @@ dependencies = [
+- "netlink-packet-core",
+- "netlink-packet-route",
+- "netlink-sys 0.9.0",
++ "netlink-packet-core 0.8.2",
++ "netlink-packet-route 0.25.1",
++ "netlink-sys 0.8.8",
+@@ -2314,0 +2306,9 @@ dependencies = [
++[[package]]
++name = "netlink-packet-core"
++version = "0.8.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "b897d7bd4f0af82e68d40d0344cf37e97f9c97ddf74a098de3e4da05e96ca395"
++dependencies = [
++ "paste",
++]
++
+@@ -2320,0 +2321,12 @@ checksum = "2d6e2daf9a8c2e21302714706860a0e6be02e03d17294ecc66b354ea7d4059dd"
++[[package]]
++name = "netlink-packet-route"
++version = "0.25.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "3ec2f5b6839be2a19d7fa5aab5bc444380f6311c2b693551cb80f45caaa7b5ef"
++dependencies = [
++ "bitflags 2.13.2",
++ "libc",
++ "log",
++ "netlink-packet-core 0.8.2",
++]
++
+@@ -2330 +2342 @@ dependencies = [
+- "netlink-packet-core",
++ "netlink-packet-core 0.9.0",
+@@ -2627,0 +2640,6 @@ dependencies = [
++[[package]]
++name = "paste"
++version = "1.0.15"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
++
+@@ -2804,2 +2822,2 @@ dependencies = [
+- "netlink-packet-core",
+- "netlink-packet-route",
++ "netlink-packet-core 0.9.0",
++ "netlink-packet-route 0.33.0",
+@@ -3084 +3102 @@ version = "0.11.12"
+-source = "git+https://github.com/peakpassvpn/quinn.git?rev=f814623b47c3435cf71b7570780c1dcf136a9b5c#f814623b47c3435cf71b7570780c1dcf136a9b5c"
++source = "git+https://github.com/peakpassvpn/quinn.git?rev=b19aa3ec659ff90d068deb14fafa594136fd86e8#b19aa3ec659ff90d068deb14fafa594136fd86e8"
+@@ -3094 +3112 @@ dependencies = [
+- "socket2 0.6.5",
++ "socket2 0.5.10",
+@@ -3104 +3122 @@ version = "0.1.0"
+-source = "git+https://github.com/peakpassvpn/quinn-btls.git?rev=abf888f2bc1ff076df4ed6d652325de8cc231bc8#abf888f2bc1ff076df4ed6d652325de8cc231bc8"
++source = "git+https://github.com/peakpassvpn/quinn-btls.git?rev=e57c89ddb9e3e661b1226977764bc299226b8472#e57c89ddb9e3e661b1226977764bc299226b8472"
+@@ -3121 +3139 @@ version = "0.11.19"
+-source = "git+https://github.com/peakpassvpn/quinn.git?rev=f814623b47c3435cf71b7570780c1dcf136a9b5c#f814623b47c3435cf71b7570780c1dcf136a9b5c"
++source = "git+https://github.com/peakpassvpn/quinn.git?rev=b19aa3ec659ff90d068deb14fafa594136fd86e8#b19aa3ec659ff90d068deb14fafa594136fd86e8"
+@@ -3142 +3160 @@ version = "0.5.16"
+-source = "git+https://github.com/peakpassvpn/quinn.git?rev=f814623b47c3435cf71b7570780c1dcf136a9b5c#f814623b47c3435cf71b7570780c1dcf136a9b5c"
++source = "git+https://github.com/peakpassvpn/quinn.git?rev=b19aa3ec659ff90d068deb14fafa594136fd86e8#b19aa3ec659ff90d068deb14fafa594136fd86e8"
+@@ -3147 +3165 @@ dependencies = [
+- "socket2 0.6.5",
++ "socket2 0.5.10",
+@@ -3149 +3167 @@ dependencies = [
+- "windows-sys 0.61.2",
++ "windows-sys 0.52.0",
+@@ -3344,2 +3362,3 @@ name = "route_manager"
+-version = "0.2.16"
+-source = "git+https://github.com/tun-rs/route_manager.git?rev=d0a6c5e3fbea1b4fba74bd2ad9739bc670936aaf#d0a6c5e3fbea1b4fba74bd2ad9739bc670936aaf"
++version = "0.2.17"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "694798681cd69a10928204225a680ad9416b081d9e9f8718d7a61e2d134da323"
+@@ -3349,2 +3368,2 @@ dependencies = [
+- "netlink-packet-core",
+- "netlink-packet-route",
++ "netlink-packet-core 0.9.0",
++ "netlink-packet-route 0.33.0",
+@@ -3478,2 +3497,2 @@ name = "sail"
+-version = "0.22.0"
+-source = "git+https://github.com/peakpassvpn/sail.git?tag=v0.22.0#7513c15139e3c8cddb59952d93a8f8b59ec934f1"
++version = "0.24.0"
++source = "git+https://github.com/peakpassvpn/sail.git?rev=ea07e9c6e59e765fca5bdb32f4183e5a86561050#ea07e9c6e59e765fca5bdb32f4183e5a86561050"
+@@ -3569 +3588 @@ version = "0.1.0"
+-source = "git+https://github.com/peakpassvpn/sail.git?tag=v0.22.0#7513c15139e3c8cddb59952d93a8f8b59ec934f1"
++source = "git+https://github.com/peakpassvpn/sail.git?rev=ea07e9c6e59e765fca5bdb32f4183e5a86561050#ea07e9c6e59e765fca5bdb32f4183e5a86561050"
+@@ -3822,6 +3840,0 @@ dependencies = [
+-[[package]]
+-name = "shlex"
+-version = "1.3.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
+-
+diff --git a/Cargo.toml b/Cargo.toml
+index ce7f119..f939017 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -30 +30 @@ repository = "https://github.com/peakpassvpn/ppvpn-client"
+-sail = { git = "https://github.com/peakpassvpn/sail.git", tag = "v0.22.0", features = ["auto-reload"] }
++sail = { git = "https://github.com/peakpassvpn/sail.git", rev = "ea07e9c6e59e765fca5bdb32f4183e5a86561050", features = ["auto-reload"] }
+@@ -43,2 +43,2 @@ serde_json = "1"
+-btls = { git = "https://github.com/peakpassvpn/btls.git", rev = "c0fb9dd9f610d0f76ae2b5afb30d65dce9b5e74c" }
+-btls-sys = { git = "https://github.com/peakpassvpn/btls.git", rev = "c0fb9dd9f610d0f76ae2b5afb30d65dce9b5e74c" }
++btls = { git = "https://github.com/peakpassvpn/btls.git", rev = "132da2caff5d94c0f9ea52aa82bbc170bf2baaa6" }
++btls-sys = { git = "https://github.com/peakpassvpn/btls.git", rev = "132da2caff5d94c0f9ea52aa82bbc170bf2baaa6" }
+@@ -46,6 +46,3 @@ btls-sys = { git = "https://github.com/peakpassvpn/btls.git", rev = "c0fb9dd9f61
+-quinn = { git = "https://github.com/peakpassvpn/quinn.git", rev = "f814623b47c3435cf71b7570780c1dcf136a9b5c" }
+-quinn-proto = { git = "https://github.com/peakpassvpn/quinn.git", rev = "f814623b47c3435cf71b7570780c1dcf136a9b5c" }
+-# tun-rs's netlink graph without paste (RUSTSEC-2024-0436), on one
+-# netlink-sys (0.9); see sail's tools/security/policy.toml for when these go.
+-netconfig-rs = { git = "https://github.com/peakpassvpn/netconfig-rs.git", rev = "c4186a6416cce1b66ca65200b7a23b5e859181d7" }
+-route_manager = { git = "https://github.com/tun-rs/route_manager.git", rev = "d0a6c5e3fbea1b4fba74bd2ad9739bc670936aaf" }
++quinn = { git = "https://github.com/peakpassvpn/quinn.git", rev = "b19aa3ec659ff90d068deb14fafa594136fd86e8" }
++quinn-proto = { git = "https://github.com/peakpassvpn/quinn.git", rev = "b19aa3ec659ff90d068deb14fafa594136fd86e8" }
++
