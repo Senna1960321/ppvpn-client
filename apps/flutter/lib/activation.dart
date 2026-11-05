@@ -24,18 +24,23 @@ const _channel = MethodChannel('ppvpn/activation');
 
 /// For the app's life: [onShow] for another launch or a reopen, [onPush]
 /// with a clicked notification's push id, [onQuit] when the installer asks
-/// the app to quit (Windows), [onUpdate] when an update's installer has
-/// started and the app should step out of sight until then (Windows).
+/// the app to quit (Windows), [onUserQuit] for the application menu's Quit
+/// (macOS: the runner routes it here, so that the app quits as the tray's
+/// Quit does), [onUpdate] when an update's installer has started and the
+/// app should step out of sight until then (Windows).
 void listenForActivations({
   required void Function() onShow,
   required void Function(int pushId) onPush,
   required void Function() onQuit,
+  required void Function() onUserQuit,
   required void Function() onUpdate,
 }) {
   if (Platform.isMacOS) {
     void take(Object? item) {
       if (item == 'show') {
         onShow();
+      } else if (item == 'quit') {
+        onUserQuit();
       } else if (item is String) {
         final id = pushLinkId(item);
         if (id != null) onPush(id);

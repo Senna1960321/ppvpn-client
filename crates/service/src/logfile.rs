@@ -174,10 +174,15 @@ impl log4rs::append::Append for RotatingAppender {
 /// Installs the service's logger (info and above) writing to
 /// `<log_dir>/ppvpn-service.log`.
 pub fn init_service_logger() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    init_logger(SERVICE_LOG)
+}
+
+/// The same logger, writing to `<log_dir>/<name>` (the update runner's).
+pub fn init_logger(name: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
     use log4rs::config::{Appender, Config, Root};
     use log4rs::encode::pattern::PatternEncoder;
 
-    let path = prepare_log_dir()?.join(SERVICE_LOG);
+    let path = prepare_log_dir()?.join(name);
     let appender = RotatingAppender {
         log: parking_lot::Mutex::new(RotatingLog::open(&path, MAX_BYTES, KEEP_FILES)?),
         encoder: Box::new(PatternEncoder::new(

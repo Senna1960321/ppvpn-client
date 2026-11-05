@@ -25,7 +25,7 @@ void main() {
     Updates.checked.value = null;
     Updates.busy.value = false;
     Updates.installPermission.value = false;
-    Updates.autoCheck.value = null;
+    Updates.autoUpdate.value = null;
     Settings.version = '';
     Settings.language.value = rust.UiLanguage.system;
   });
