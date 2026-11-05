@@ -421,11 +421,20 @@ fn status_in(staging: &Staging) -> (Option<UpdateProgress>, Option<UpdateResult>
 /// Cleans up after an earlier service process (at start).
 pub fn settle_at_start() {
     if let Some(staging) = Staging::system() {
-        let _active = ACTIVE.lock();
-        if let Err(error) = settle(&staging) {
+        if let Err(error) = settle_if_idle(&staging) {
             log::info!("update reservation unavailable at service start: {error}");
         }
     }
+}
+
+/// Windows starts cleanup on a background thread. An IPC request may have
+/// already reserved the update by the time that thread gets scheduled.
+fn settle_if_idle(staging: &Staging) -> std::io::Result<()> {
+    let active = ACTIVE.lock();
+    if active.is_some() {
+        return Ok(());
+    }
+    settle(staging)
 }
 
 /// The client process at the other end of an `InstallUpdate` connection.

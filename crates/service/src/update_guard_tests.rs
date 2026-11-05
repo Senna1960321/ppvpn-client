@@ -311,4 +311,18 @@ mod guard_tests {
         assert_eq!(read_job(&fixture.0), Some(job));
         assert!(read_result(&fixture.0).is_none());
     }
+
+    #[test]
+    fn delayed_startup_cleanup_leaves_a_newly_accepted_request_alone() {
+        let _serial = serial();
+        let fixture = Fixture::new("delayed-startup-cleanup");
+        let signer = Signer::new();
+        let payload = download(&fixture.0.root.join("cache"), &signer, b"installer");
+        let staged = check_with(&fixture.0, &signer, payload, &good_checks()).unwrap();
+        settle_if_idle(&fixture.0).unwrap();
+        assert!(fixture.0.current().join(PACKAGE).is_file());
+        assert!(ACTIVE.lock().is_some());
+        assert!(read_result(&fixture.0).is_none());
+        drop(staged);
+    }
 }
