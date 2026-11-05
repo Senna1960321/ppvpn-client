@@ -3,6 +3,7 @@ package main
 import (
 	"io"
 	"net"
+	"sync"
 	"testing"
 	"time"
 )
@@ -39,12 +40,22 @@ func TestStreamCountsCompletedEchoes(t *testing.T) {
 }
 
 func TestStreamDoesNotCountAcceptedButResetConnections(t *testing.T) {
+	var dialled sync.WaitGroup
+	dialled.Add(4)
 	dial := echoListener(t, func(conn net.Conn) {
+		// An immediate reset can reach Dial before it returns on macOS.
+		// Complete all handshakes first so this tests reset streams, not
+		// the platform-dependent result of racing a reset with Dial.
+		dialled.Wait()
 		_, _ = conn.Write([]byte{0})
 		_ = conn.(*net.TCPConn).SetLinger(0)
 	})
 	var got result
-	stream(dial, 4, 8, 100*time.Millisecond, &got)
+	stream(func() (net.Conn, error) {
+		conn, err := dial()
+		dialled.Done()
+		return conn, err
+	}, 4, 8, 100*time.Millisecond, &got)
 	if got.Connections != 4 || got.CompletedEchoes != 0 {
 		t.Fatalf("TCP handshakes are not completed echoes: %+v", got)
 	}
