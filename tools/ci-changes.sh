@@ -47,7 +47,7 @@
 #         when either changed.
 #   memory  the memory harness (ne-mem, tools/perf/{ne_mem,dhat_top}.py, test/perf/)
 #         or Cargo.lock (a sail upgrade): ci.yml's macos and linux jobs
-#         then build it in release and measure (#388).
+#         then build it in the mobile profile and measure (#388).
 # Every other event (workflow_dispatch, a new branch), a compare that fails,
 # or one with 300 files or more (the API's page limit) counts as changing
 # everything.
@@ -79,7 +79,8 @@ while IFS= read -r f; do
     Cargo.toml | */Cargo.toml | Cargo.lock | rust-toolchain.toml | .cargo/config.toml) lock=true ;;
   esac
   case $f in
-    Cargo.lock | crates/core-lab/src/bin/ne-mem.rs | tools/perf/ne_mem.py | tools/perf/ne_mem_test.py | tools/perf/dhat_top.py | \
+    Cargo.lock | crates/core-lab/src/bin/ne-mem.rs | crates/core-lab/src/bin/ne-mem/* | \
+    tools/perf/ne_mem.py | tools/perf/ne_mem_test.py | tools/perf/dhat_top.py | \
     test/perf/*) memory=true ;;
   esac
   case $f in

@@ -524,8 +524,9 @@ def run(args, variant, settings, workers, ports, sizes, work, node, trust_bundle
         th.join()
         mark("switch", load=holder.get("load"))
 
-        # The AnyTLS sessions the burst's upstream queries (DoT through the
-        # node) open, which the session cap may or may not count.
+        # All established AnyTLS sessions during the burst, including idle
+        # pooled sessions from prior loads. fixture_connections separately
+        # counts the local DoT responder's TLS connections.
         before_dns = node_dns_stats(node) if args.dns_source == "local" else None
         sessions = PeakCounter(lambda: node_connections(ports["anytls_port"]))
         answered = dns_burst(args.dns_queries, args.dns_rate)

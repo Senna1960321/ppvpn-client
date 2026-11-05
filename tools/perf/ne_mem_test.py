@@ -5,13 +5,46 @@ import io
 import os
 import socket
 import struct
+import subprocess
 import tempfile
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import ne_mem
+
+
+class MemoryScopeTest(unittest.TestCase):
+    def classify(self, changed_file):
+        # Exercise the real selector, replacing only GitHub's changed-file
+        # response. No network or repository history is needed.
+        with tempfile.TemporaryDirectory() as work:
+            gh = Path(work) / "gh"
+            gh.write_text('#!/bin/sh\nprintf "%s\\n" "$CI_TEST_CHANGED_FILE"\n')
+            gh.chmod(0o700)
+            env = dict(os.environ, PATH=work + os.pathsep + os.environ["PATH"],
+                       GITHUB_EVENT_NAME="pull_request", PR_BASE_SHA="a" * 40,
+                       GITHUB_SHA="b" * 40, GITHUB_REPOSITORY="example/project",
+                       CI_TEST_CHANGED_FILE=changed_file)
+            result = subprocess.run(["bash", str(Path(__file__).resolve().parents[1] / "ci-changes.sh")],
+                                    env=env, capture_output=True, text=True, check=True)
+            return dict(line.split("=", 1) for line in result.stdout.splitlines())
+
+    def test_ne_mem_and_its_helpers_run_the_memory_gate(self):
+        for path in ("crates/core-lab/src/bin/ne-mem.rs",
+                     "crates/core-lab/src/bin/ne-mem/trust.rs",
+                     "crates/core-lab/src/bin/ne-mem/helper/nested.rs"):
+            with self.subTest(path=path):
+                scope = self.classify(path)
+                self.assertEqual(scope["memory"], "true")
+                self.assertEqual(scope["code"], "true")
+
+    def test_unrelated_lab_code_does_not_run_the_memory_gate(self):
+        scope = self.classify("crates/core-lab/src/bin/other.rs")
+        self.assertEqual(scope["memory"], "false")
+        self.assertEqual(scope["code"], "true")
 
 
 class LocalDNSFixtureTest(unittest.TestCase):
