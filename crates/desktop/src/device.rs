@@ -263,44 +263,8 @@ impl Client {
         }
     }
 
-    /// Sign-out: deletes the device on the backend (best effort, while the
-    /// session can still authenticate).
-    pub(crate) async fn unregister_device(&self) {
-        if official_push(&self.config.platform) {
-            let Ok(session) = self.current_session() else {
-                return;
-            };
-            let registered = self.session_state().device == DeviceState::Registered;
-            if let (true, Some(os_token)) = (registered, read_os_token(&self.config.data_dir)) {
-                self.unregister_os_token(session, &os_token.token).await;
-            }
-            return;
-        }
-        let Some(file) = read_agent_file(&self.config.data_dir) else {
-            return;
-        };
-        let Ok(session) = self.current_session() else {
-            return;
-        };
-        let id = file.device_id;
-        let deleted = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            self.bearer(
-                session,
-                |token| async move { self.auth.api().delete_device(&token, id).await },
-                ApiError::into_client_error,
-            ),
-        )
-        .await;
-        match deleted {
-            Ok(Ok(())) => tracing::info!("push registration: device {id} deleted"),
-            Ok(Err(error)) => tracing::info!("push registration: delete failed: {error}"),
-            Err(_) => tracing::info!("push registration: delete timed out"),
-        }
-    }
-
-    /// Disables the device holding the OS push token `push_token` (best
-    /// effort).
+    /// Token rotation is still signed in and may refresh authorization.
+    /// Logout uses the captured-token path below instead.
     async fn unregister_os_token(&self, session: u64, push_token: &str) {
         let unregistered = tokio::time::timeout(
             std::time::Duration::from_secs(5),
@@ -320,6 +284,57 @@ impl Client {
             Ok(Ok(())) => tracing::info!("push registration: device unregistered"),
             Ok(Err(error)) => tracing::info!("push registration: unregister failed: {error}"),
             Err(_) => tracing::info!("push registration: unregister timed out"),
+        }
+    }
+
+    /// Capture the old registration and access token now, before sign-out
+    /// clears session state and agent files. Polling the returned future
+    /// only performs bounded remote cleanup; it cannot refresh credentials
+    /// or attach the request to a later signed-in session.
+    pub(crate) fn unregister_device(&self) -> impl std::future::Future<Output = ()> + '_ {
+        enum Device {
+            Push(String),
+            Agent(u64),
+        }
+        let request = (|| {
+            let session = self.current_session().ok()?;
+            // No refresh during logout: stale authorization simply makes
+            // device removal unavailable; session revocation still runs.
+            let token = self.fresh_access(session).ok()??;
+            let state = self.session_state();
+            let registered = state.device == DeviceState::Registered;
+            drop(state);
+            let device = if official_push(&self.config.platform) {
+                if !registered {
+                    return None;
+                }
+                Device::Push(read_os_token(&self.config.data_dir)?.token)
+            } else {
+                Device::Agent(read_agent_file(&self.config.data_dir)?.device_id)
+            };
+            Some((token, device))
+        })();
+        async move {
+            let Some((token, device)) = request else {
+                return;
+            };
+            let unregistered = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                match device {
+                    Device::Push(push_token) => {
+                        self.auth
+                            .api()
+                            .unregister_push_token(&token, &push_token)
+                            .await
+                    }
+                    Device::Agent(id) => self.auth.api().delete_device(&token, id).await,
+                }
+            })
+            .await;
+            match unregistered {
+                Ok(Ok(())) => tracing::info!("push registration: device unregistered"),
+                Ok(Err(error)) => tracing::info!("push registration: unregister failed: {error:?}"),
+                Err(_) => tracing::info!("push registration: unregister timed out"),
+            }
         }
     }
 }
@@ -359,6 +374,20 @@ mod tests {
     }
 
     fn client_on(base: &str, data_dir: &str, platform: &str) -> Arc<Client> {
+        client_with_store(
+            base,
+            data_dir,
+            platform,
+            MemoryPlatform::with_blob(r#"{"version":1,"active_refresh":"jyr_old"}"#),
+        )
+    }
+
+    fn client_with_store(
+        base: &str,
+        data_dir: &str,
+        platform: &str,
+        store: Arc<MemoryPlatform>,
+    ) -> Arc<Client> {
         Client::with_parts(
             ClientConfig {
                 api_base: base.to_string(),
@@ -367,7 +396,7 @@ mod tests {
                 platform: platform.into(),
                 app_version: "1.2.3".into(),
             },
-            MemoryPlatform::with_blob(r#"{"version":1,"active_refresh":"jyr_old"}"#),
+            store,
             Arc::new(Quiet),
             Arc::new(NoService),
             FakeLauncher::new(),
@@ -381,6 +410,49 @@ mod tests {
             .build()
             .unwrap()
             .block_on(future)
+    }
+
+    #[test]
+    fn local_logout_finishes_before_a_stalled_device_unregistration() {
+        for platform in ["windows", "ios"] {
+            let backend = Backend::new();
+            let base = serve(backend.clone());
+            let dir = temp_dir("ppvpn-logout-before-unregister");
+            let store = MemoryPlatform::with_blob(r#"{"version":1,"active_refresh":"jyr_old"}"#);
+            let client = client_with_store(&base, &dir, platform, store.clone());
+            if official_push(platform) {
+                client.set_push_token("apns-logout-test".into(), Some("com.example.app".into()));
+            }
+            wait_until(|| client.session_state().device == DeviceState::Registered);
+            let (release, gate) = std::sync::mpsc::channel();
+            *backend.unregister_gate.lock().unwrap() = Some(gate);
+            let signing_out = client.clone();
+            let logout = std::thread::spawn(move || block_on(signing_out.logout()));
+            let request = if official_push(platform) {
+                "/devices/unregister"
+            } else {
+                "DELETE /api/v1/devices/"
+            };
+            wait_until(|| !backend.requests_matching(request).is_empty());
+            let cleared = store.stored().is_none();
+            let signed_out = client.snapshot().auth == crate::AuthState::SignedOut;
+            let agent_removed = read_agent_file(&dir).is_none();
+            let _ = release.send(());
+            logout.join().unwrap().unwrap();
+            assert!(
+                cleared,
+                "{platform}: credentials still present during unregistration"
+            );
+            assert!(signed_out, "{platform}: local session still signed in");
+            assert!(
+                agent_removed,
+                "{platform}: old agent registration still present"
+            );
+            assert_eq!(backend.requests_matching("/auth/device/revoke").len(), 1);
+            client.shutdown();
+            drop(client);
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 
     #[test]

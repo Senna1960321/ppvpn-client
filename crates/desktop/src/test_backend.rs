@@ -32,6 +32,16 @@ pub(crate) struct Backend {
     pub(crate) register_status: Mutex<Option<&'static str>>,
     /// Bodies of `POST /devices/register` and `/devices/unregister`.
     pub(crate) device_bodies: Mutex<Vec<Value>>,
+    /// Hold the next device removal response until the test releases it.
+    pub(crate) unregister_gate: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    /// Refuse device removal, including a captured access token rejected at logout.
+    pub(crate) unregister_status: Mutex<Option<&'static str>>,
+    /// The refresh credential issued by a test's new login; none answers 404.
+    pub(crate) activation_refresh: Mutex<Option<String>>,
+    /// Hold the next session revoke response until the test releases it.
+    pub(crate) revoke_gate: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    /// Credentials whose revoke handlers completed, including after client cancellation.
+    pub(crate) revoked_refreshes: Mutex<Vec<String>>,
     /// Request heads (lower-cased) of `GET /api/v1/health`.
     pub(crate) health_heads: Mutex<Vec<String>>,
     /// Body of `GET /api/v1/me/proxy-profile`; none answers 404
@@ -115,6 +125,17 @@ impl Backend {
         if path.starts_with("/api/v1/messages") && *self.forbidden.lock().unwrap() {
             return ("403 Forbidden", r#"{"code":"403001"}"#.into());
         }
+        if (method == "DELETE" && path.starts_with("/api/v1/devices/"))
+            || path == "/api/v1/devices/unregister"
+        {
+            let gate = self.unregister_gate.lock().unwrap().take();
+            if let Some(gate) = gate {
+                let _ = gate.recv_timeout(Duration::from_secs(5));
+            }
+            if let Some(status) = *self.unregister_status.lock().unwrap() {
+                return (status, r#"{"code":"AUTH_ACCESS_TOKEN_INVALID"}"#.into());
+            }
+        }
         if path.starts_with("/api/v1/push/") {
             let token = self.push_token.lock().unwrap().to_ascii_lowercase();
             if headers.contains("x-push-token: ppd_forbidden") {
@@ -137,7 +158,26 @@ impl Backend {
                 ("200 OK", r#"{"refresh_token":"jyr_prepared"}"#.into())
             }
             ("POST", "/api/v1/auth/device/refresh/commit") => ("200 OK", token_set("jyr_a")),
-            ("POST", "/api/v1/auth/device/revoke") => ("200 OK", r#"{"revoked":true}"#.into()),
+            ("POST", "/api/v1/auth/device/activate") => {
+                match self.activation_refresh.lock().unwrap().as_deref() {
+                    Some(refresh) => ("200 OK", token_set(refresh)),
+                    None => ("404 Not Found", r#"{"code":"NOT_FOUND"}"#.into()),
+                }
+            }
+            ("POST", "/api/v1/auth/device/revoke") => {
+                let gate = self.revoke_gate.lock().unwrap().take();
+                if let Some(gate) = gate {
+                    let _ = gate.recv_timeout(Duration::from_secs(10));
+                }
+                let request: Value = serde_json::from_str(body).unwrap_or_default();
+                self.revoked_refreshes.lock().unwrap().push(
+                    request["refresh_token"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string(),
+                );
+                ("200 OK", r#"{"revoked":true}"#.into())
+            }
             ("GET", "/api/v1/users/me") => {
                 ("200 OK", r#"{"id":"u7","name":"N","avatar":""}"#.into())
             }
