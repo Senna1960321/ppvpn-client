@@ -10,8 +10,9 @@
 //! `GetVersion` reads it, and reopens the app when the client asked for it.
 //!
 //! The staging directory (root or SYSTEM only):
-//!   current/          the update in progress: job.json, lock (held by the
-//!                     runner while it runs), the package, the runner and,
+//!   lock              shared by Connect, cleanup and the detached runner;
+//!                     never removed with a job
+//!   current/          the update in progress: job.json, the package, the runner and,
 //!                     on macOS, new/ (root-only copies of the new service
 //!                     helpers)
 //!   last-update.json  the last result
@@ -148,6 +149,9 @@ enum Phase {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Job {
+    /// Binds a delayed runner to this job, never a later staged package.
+    #[serde(default)]
+    id: String,
     version: String,
     build: u64,
     relaunch: bool,
@@ -200,16 +204,14 @@ impl Staging {
     }
 
     fn lock_path(&self) -> PathBuf {
-        self.current().join("lock")
+        self.root.join("lock")
     }
 
     fn result_path(&self) -> PathBuf {
         self.root.join("last-update.json")
     }
 
-    /// An empty current/, created by this process in a directory only it
-    /// can write.
-    fn prepare(&self) -> Result<PathBuf, String> {
+    fn prepare_root(&self) -> Result<(), String> {
         if self.system {
             let parent = self
                 .root
@@ -226,6 +228,13 @@ impl Staging {
         } else {
             std::fs::create_dir_all(&self.root).map_err(|error| error.to_string())?;
         }
+        Ok(())
+    }
+
+    /// An empty current/, created by this process in a directory only it
+    /// can write. The root reservation survives replacement of this job.
+    fn prepare(&self) -> Result<PathBuf, String> {
+        self.prepare_root()?;
         let current = self.current();
         if std::fs::symlink_metadata(&current).is_ok() {
             std::fs::remove_dir_all(&current)
@@ -287,21 +296,42 @@ fn record(staging: &Staging, job: &Job, outcome: Result<(), String>) {
     }
 }
 
-/// Whether a runner holds current/'s lock (it does while it runs).
-fn runner_running(staging: &Staging) -> bool {
-    let Ok(lock) = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(staging.lock_path())
-    else {
-        return false;
+/// Hold the same, stable lock through cleanup, core startup or installation.
+/// A missing root is idle; all other open/lock errors fail closed. Only the
+/// service creates the private root, and the lock is never unlinked.
+fn reservation(staging: &Staging) -> std::io::Result<Option<std::fs::File>> {
+    match std::fs::symlink_metadata(&staging.root) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+        Ok(_) => {}
+    }
+    if staging.system {
+        platform::trusted_dir(&staging.root).map_err(std::io::Error::other)?;
+    }
+    let lock = match platform::create_new_private_file(&staging.lock_path()) {
+        Ok(lock) => lock,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(staging.lock_path())?
+        }
+        Err(error) => return Err(error),
     };
-    matches!(lock.try_lock(), Err(std::fs::TryLockError::WouldBlock))
+    let metadata = lock.metadata()?;
+    if !metadata.is_file() || platform::is_reparse_point(&metadata) {
+        return Err(std::io::Error::other("update lock is not a regular file"));
+    }
+    match lock.try_lock() {
+        Ok(()) => Ok(Some(lock)),
+        Err(std::fs::TryLockError::WouldBlock) => Err(std::io::ErrorKind::WouldBlock.into()),
+        Err(std::fs::TryLockError::Error(error)) => Err(error),
+    }
 }
 
-/// Keep the update reservation locked through Connect's core mutation. Both
-/// paths take ACTIVE before CORE; checking status before taking CORE would
-/// leave a gap in which an installer can start beneath a new connection.
+/// Both paths take ACTIVE before the disk reservation before CORE. A service
+/// restart may race an old worker before it locks: cancel that job under the
+/// reservation before a new core starts. The worker also checks its job id.
 pub fn guard_connect<T>(connect: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
     guard_connect_in(Staging::system().as_ref(), connect)
 }
@@ -314,43 +344,56 @@ fn guard_connect_in<T>(
     if active.is_some() {
         anyhow::bail!(IN_PROGRESS);
     }
-    // After a service replacement ACTIVE is empty, while the independent
-    // runner still owns the disk lock. A malformed job must not unblock it.
-    if let Some(staging) = staging {
-        match std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(staging.lock_path())
-        {
-            Ok(lock) => match lock.try_lock() {
-                Ok(()) => {}
-                Err(_) => anyhow::bail!(IN_PROGRESS),
-            },
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => anyhow::bail!(IN_PROGRESS),
-        }
-    }
+    let _reservation = if let Some(staging) = staging {
+        let lock = reservation(staging).map_err(|_| anyhow::anyhow!(IN_PROGRESS))?;
+        settle_locked(staging).map_err(|_| anyhow::anyhow!(IN_PROGRESS))?;
+        lock
+    } else {
+        None
+    };
     connect()
 }
 
-/// With nothing in progress in this process (`ACTIVE` held and empty): a
-/// runner started by an earlier service process is in progress; anything
-/// else in current/ is removed, and an install cut short (the machine
-/// restarted under it) recorded as failed.
-fn settle(staging: &Staging) -> Option<UpdateProgress> {
-    let current = staging.current();
-    std::fs::symlink_metadata(&current).ok()?;
-    let job = read_job(staging);
-    if runner_running(staging) {
-        return job.and_then(|job| job.progress());
+/// ACTIVE must be held and empty. Keep the reservation until cleanup ends,
+/// rather than merely probing it and racing a worker that has not locked yet.
+fn settle(staging: &Staging) -> std::io::Result<()> {
+    let _reservation = reservation(staging)?;
+    settle_locked(staging)
+}
+
+fn settle_locked(staging: &Staging) -> std::io::Result<()> {
+    if let Some(job) = read_job(staging) {
+        if job.phase == Phase::Installing {
+            record(staging, &job, Err(format!("{INSTALL_FAILED}:interrupted")));
+        }
     }
-    if let Some(job) = job.filter(|job| job.phase == Phase::Installing) {
-        record(staging, &job, Err(format!("{INSTALL_FAILED}:interrupted")));
+    // Invalidate first, even if Windows cannot remove an old runner's exe.
+    // A worker delayed before taking the lock must never install this job.
+    match std::fs::remove_file(staging.job_path()) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
     }
-    if let Err(error) = std::fs::remove_dir_all(&current) {
-        log::warn!("cannot remove {}: {error}", current.display());
+    if let Err(error) = std::fs::remove_dir_all(staging.current()) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            log::warn!("cannot remove {}: {error}", staging.current().display());
+        }
     }
-    None
+    Ok(())
+}
+
+/// A stale runner cannot consume a new job, even if its directory was reused.
+fn claim_runner(staging: &Staging, id: &str) -> Result<(std::fs::File, Job), String> {
+    if id.is_empty() {
+        return Err("missing update job id".into());
+    }
+    let lock = reservation(staging)
+        .map_err(|error| format!("update reservation: {error}"))?
+        .ok_or_else(|| "no update to install".to_string())?;
+    let job = read_job(staging)
+        .filter(|job| job.id == id && job.phase == Phase::Installing)
+        .ok_or_else(|| "no matching update to install".to_string())?;
+    Ok((lock, job))
 }
 
 /// `GetVersion`'s `update` and `last_update`.
@@ -366,7 +409,10 @@ fn status_in(staging: &Staging) -> (Option<UpdateProgress>, Option<UpdateResult>
         let active = ACTIVE.lock();
         match active.as_ref() {
             Some(job) => job.progress(),
-            None => settle(staging),
+            None => match settle(staging) {
+                Ok(()) => None,
+                Err(_) => read_job(staging).and_then(|job| job.progress()),
+            },
         }
     };
     (progress, read_result(staging))
@@ -376,13 +422,8 @@ fn status_in(staging: &Staging) -> (Option<UpdateProgress>, Option<UpdateResult>
 pub fn settle_at_start() {
     if let Some(staging) = Staging::system() {
         let _active = ACTIVE.lock();
-        if let Some(progress) = settle(&staging) {
-            log::info!(
-                "update to {} ({}) still {}",
-                progress.version,
-                progress.build,
-                progress.phase
-            );
+        if let Err(error) = settle(&staging) {
+            log::info!("update reservation unavailable at service start: {error}");
         }
     }
 }
@@ -438,6 +479,7 @@ fn check_in(
     checks: &dyn PackageChecks,
 ) -> Result<Staged, &'static str> {
     let job = Job {
+        id: uuid::Uuid::new_v4().to_string(),
         version: payload.version.clone(),
         build: payload.build,
         relaunch: payload.relaunch,
@@ -447,9 +489,12 @@ fn check_in(
     };
     {
         let mut active = ACTIVE.lock();
-        if active.is_some() || settle(&staging).is_some() {
+        if active.is_some() {
             return Err(IN_PROGRESS);
         }
+        staging.prepare_root().map_err(|_| UNSUPPORTED)?;
+        let _reservation = reservation(&staging).map_err(|_| IN_PROGRESS)?;
+        settle_locked(&staging).map_err(|_| IN_PROGRESS)?;
         if busy() {
             return Err(BUSY);
         }
@@ -636,7 +681,7 @@ fn supervise(staging: Staging, mut job: Job, client: Client, busy: fn() -> bool)
         return;
     }
     *ACTIVE.lock() = Some(job.clone());
-    let mut runner = match spawn_runner(&staging) {
+    let mut runner = match spawn_runner(&staging, &job) {
         Ok(runner) => runner,
         Err(error) => {
             finish(
@@ -658,18 +703,19 @@ fn supervise(staging: Staging, mut job: Job, client: Client, busy: fn() -> bool)
     let mut active = ACTIVE.lock();
     *active = None;
     log::info!("update runner exited: {status:?}");
-    settle(&staging);
+    let _ = settle(&staging);
 }
 
 /// Starts a copy of this binary as the runner, outside this process's
 /// group (macOS) or console (Windows), so stopping the service leaves it.
-fn spawn_runner(staging: &Staging) -> std::io::Result<std::process::Child> {
+fn spawn_runner(staging: &Staging, job: &Job) -> std::io::Result<std::process::Child> {
     use std::process::{Command, Stdio};
     let runner = staging.current().join(RUNNER);
     std::fs::copy(std::env::current_exe()?, &runner)?;
     let mut command = Command::new(&runner);
     command
         .arg(RUNNER_FLAG)
+        .arg(&job.id)
         .current_dir(staging.current())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -724,26 +770,13 @@ pub fn run_runner() -> i32 {
     if let Err(error) = crate::logfile::init_logger(RUNNER_LOG) {
         eprintln!("cannot open the update log: {error}");
     }
-    let lock = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(staging.lock_path());
-    let lock = match lock {
-        Ok(lock) => lock,
+    let id = std::env::args().nth(2).unwrap_or_default();
+    let (_reservation, mut job) = match claim_runner(&staging, &id) {
+        Ok(claim) => claim,
         Err(error) => {
-            log::error!("cannot open the update lock: {error}");
+            log::error!("cannot claim update: {error}");
             return 2;
         }
-    };
-    if let Err(error) = lock.lock() {
-        log::error!("cannot take the update lock: {error}");
-        return 2;
-    }
-    let Some(mut job) = read_job(&staging).filter(|job| job.phase == Phase::Installing) else {
-        log::error!("no update to install");
-        return 2;
     };
     log::info!("installing {} ({})", job.version, job.build);
     let current = staging.current();
@@ -1876,6 +1909,7 @@ mod tests {
         let staging = temp_staging("runner");
         std::fs::create_dir_all(staging.current()).unwrap();
         let job = Job {
+            id: uuid::Uuid::new_v4().to_string(),
             version: "0.7.5".into(),
             build: 340,
             relaunch: false,
@@ -1939,6 +1973,7 @@ mod tests {
         let staging = temp_staging("shape");
         std::fs::create_dir_all(&staging.root).unwrap();
         let job = Job {
+            id: uuid::Uuid::new_v4().to_string(),
             version: "0.7.5".into(),
             build: 340,
             relaunch: true,
