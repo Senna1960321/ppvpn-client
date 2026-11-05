@@ -27,7 +27,7 @@ ppvpn-account = { path = "../account" }
 ppvpn-core = { path = "../core" }
 ppvpn-engine-host = { path = "../engine-host" }
 uniffi = { version = "=0.31.0", features = ["cli", "tokio"] }
-tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros", "process", "io-util", "net"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros", "process", "io-util", "net", "fs"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

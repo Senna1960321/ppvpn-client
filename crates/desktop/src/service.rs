@@ -67,6 +67,8 @@ pub(crate) enum Command {
     Disconnect,
     CoreApi,
     Watch,
+    /// Silent desktop update (#548, docs/host-integration.md section 16).
+    InstallUpdate,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,6 +157,51 @@ pub(crate) struct VersionInfo {
     /// The service's build id; `None` from older services.
     #[serde(default)]
     pub build_id: Option<String>,
+    /// The release's build number baked into the service (0 in a build
+    /// without one). This and the next two are absent from services that
+    /// predate `InstallUpdate`: `None`, no silent updates.
+    #[serde(default)]
+    pub build: Option<u64>,
+    /// The silent update being installed, if any.
+    #[serde(default)]
+    pub update: Option<UpdateProgress>,
+    /// The last silent update's result, if any.
+    #[serde(default)]
+    pub last_update: Option<UpdateResult>,
+}
+
+/// `InstallUpdate`'s payload (section 16.2).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct InstallUpdatePayload {
+    pub path: String,
+    pub version: String,
+    pub build: u64,
+    pub length: u64,
+    pub ed_signature: String,
+    pub relaunch: bool,
+}
+
+/// A silent update the service is installing (`GetVersion`'s `update`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateProgress {
+    pub version: String,
+    pub build: u64,
+    /// `waiting` (for the app to exit) or `installing`.
+    pub phase: String,
+}
+
+/// The last silent update's result (`GetVersion`'s `last_update`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateResult {
+    pub version: String,
+    pub build: u64,
+    /// `installed` or `failed`.
+    pub outcome: String,
+    /// The `UPDATE_*` code of a failure (`UPDATE_INSTALL_FAILED:<detail>`
+    /// for the installer's); `None` when installed.
+    #[serde(default)]
+    pub error: Option<String>,
+    pub finished_at_ms: u64,
 }
 
 /// Build id of the service shipped with this client (build.rs: SHA-256 of
@@ -670,6 +717,19 @@ pub(crate) trait ServiceApi: Send + Sync {
     fn watch<'a>(&'a self, _session: &'a SessionRef) -> BoxFuture<'a, WatchEnd> {
         Box::pin(async { WatchEnd::Unsupported })
     }
+    /// Hands a downloaded update to the service (section 16.3): `Ok` once
+    /// it answered `accepted`. A service that predates the command closes
+    /// the connection without an answer.
+    fn install_update<'a>(
+        &'a self,
+        _payload: &'a InstallUpdatePayload,
+    ) -> BoxFuture<'a, Result<(), ServiceError>> {
+        Box::pin(async {
+            Err(ServiceError::Unavailable(
+                "InstallUpdate unsupported".to_string(),
+            ))
+        })
+    }
     /// Drop cached handshake credentials (after a reinstall).
     fn reset_auth(&self) {}
 }
@@ -985,6 +1045,8 @@ fn encode(value: impl Serialize) -> Result<Value, ServiceError> {
 const SHORT_CALL: Duration = Duration::from_secs(15);
 /// Connect waits for the core to start (up to 8 s) plus apply + start.
 const LONG_CALL: Duration = Duration::from_secs(45);
+/// InstallUpdate copies and checks the package first (section 16.3).
+const INSTALL_CALL: Duration = Duration::from_secs(60);
 
 impl ServiceApi for ServiceClient {
     fn get_version(&self) -> BoxFuture<'_, Result<VersionInfo, ServiceError>> {
@@ -1090,6 +1152,23 @@ impl ServiceApi for ServiceClient {
                 body,
             })?;
             self.call(Command::CoreApi, payload, timeout).await
+        })
+    }
+
+    fn install_update<'a>(
+        &'a self,
+        payload: &'a InstallUpdatePayload,
+    ) -> BoxFuture<'a, Result<(), ServiceError>> {
+        Box::pin(async move {
+            let data = self
+                .call(Command::InstallUpdate, encode(payload)?, INSTALL_CALL)
+                .await?;
+            match data.get("accepted").and_then(Value::as_bool) {
+                Some(true) => Ok(()),
+                _ => Err(ServiceError::Protocol(
+                    "InstallUpdate: no accepted".to_string(),
+                )),
+            }
         })
     }
 
@@ -1267,6 +1346,27 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(current.build_id.as_deref(), Some("ab"));
+        assert_eq!(current.build, None);
+        assert_eq!(current.last_update, None);
+    }
+
+    #[test]
+    fn version_carries_the_silent_update_fields() {
+        let version: VersionInfo = serde_json::from_value(serde_json::json!({
+            "service": "PPVPN Service", "version": "0.7.5", "build_id": "ab",
+            "build": 412,
+            "update": {"version": "0.7.6", "build": 420, "phase": "installing"},
+            "last_update": {
+                "version": "0.7.5", "build": 412, "outcome": "failed",
+                "error": "UPDATE_INSTALL_FAILED:exit 1", "finished_at_ms": 1700000000000u64
+            }
+        }))
+        .unwrap();
+        assert_eq!(version.build, Some(412));
+        assert_eq!(version.update.unwrap().phase, "installing");
+        let last = version.last_update.unwrap();
+        assert_eq!(last.error.as_deref(), Some("UPDATE_INSTALL_FAILED:exit 1"));
+        assert_eq!(last.finished_at_ms, 1_700_000_000_000);
     }
 
     fn sign_response(mut response: Response, key: &[u8]) -> Response {

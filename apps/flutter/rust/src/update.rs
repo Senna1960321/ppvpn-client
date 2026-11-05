@@ -31,7 +31,7 @@
 use crate::api::UiUpdater;
 
 /// A baked-in value, None when unset or blank.
-fn baked(value: Option<&'static str>) -> Option<&'static str> {
+pub(crate) fn baked(value: Option<&'static str>) -> Option<&'static str> {
     value.map(str::trim).filter(|value| !value.is_empty())
 }
 

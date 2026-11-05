@@ -3364,6 +3364,7 @@ mod tests {
                     service: "PPVPN Service".into(),
                     version: "1.0.0".into(),
                     build_id: self.build_id.lock().unwrap().clone(),
+                    ..VersionInfo::default()
                 })
             })
         }
