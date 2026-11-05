@@ -511,6 +511,10 @@ pub(crate) mod test_support {
         pub(crate) system_proxy: Arc<Mutex<(bool, u16)>>,
         /// `apply-profile` fails while set (the core cannot run the profile).
         pub(crate) fail_apply: Arc<AtomicBool>,
+        /// Reject one routing mode (for transaction compensation tests).
+        pub(crate) reject_routing: Arc<Mutex<Option<crate::RoutingMode>>>,
+        /// Apply successfully, then lose the response for this mode.
+        pub(crate) lose_apply_reply: Arc<Mutex<Option<crate::RoutingMode>>>,
         /// `apply-profile` refuses this revision as the engine refuses a rule
         /// set on another host (`RULE_SET_HOST_NOT_ALLOWED`).
         pub(crate) reject_revision: Arc<Mutex<Option<String>>>,
@@ -546,6 +550,10 @@ pub(crate) mod test_support {
             let failing = fail_apply.clone();
             let reject_revision: Arc<Mutex<Option<String>>> = Arc::default();
             let rejected = reject_revision.clone();
+            let reject_routing: Arc<Mutex<Option<crate::RoutingMode>>> = Arc::default();
+            let rejected_mode = reject_routing.clone();
+            let lose_apply_reply: Arc<Mutex<Option<crate::RoutingMode>>> = Arc::default();
+            let lost_reply_mode = lose_apply_reply.clone();
             let rule_sets: Arc<Mutex<Value>> = Arc::default();
             let reported_rule_sets = rule_sets.clone();
             let pins: Arc<Mutex<std::collections::BTreeMap<String, String>>> = Arc::default();
@@ -619,15 +627,23 @@ pub(crate) mod test_support {
                         counters.1 += 4_096;
                         ok(json!({"upload_bytes": counters.0, "download_bytes": counters.1}))
                     }
-                    "/v1/apply-profile" if failing.load(Ordering::SeqCst) => (
-                        Duration::ZERO,
-                        Err(CoreCallError::Api {
-                            code: "INTERNAL".into(),
-                            field: None,
-                            message: "runtime failed to start".into(),
-                            retryable: false,
-                        }),
-                    ),
+                    "/v1/apply-profile"
+                        if failing.load(Ordering::SeqCst)
+                            || rejected_mode.lock().unwrap().is_some_and(|mode| {
+                                body["routing_mode"].as_str()
+                                    == Some(crate::routing::wire_name(mode))
+                            }) =>
+                    {
+                        (
+                            Duration::ZERO,
+                            Err(CoreCallError::Api {
+                                code: "INTERNAL".into(),
+                                field: None,
+                                message: "runtime failed to start".into(),
+                                retryable: false,
+                            }),
+                        )
+                    }
                     "/v1/apply-profile"
                         if rejected.lock().unwrap().as_deref()
                             == body["profile"]["revision"].as_str() =>
@@ -662,6 +678,14 @@ pub(crate) mod test_support {
                                 ))
                             })
                             .collect();
+                        if lost_reply_mode.lock().unwrap().is_some_and(|mode| {
+                            body["routing_mode"].as_str() == Some(crate::routing::wire_name(mode))
+                        }) {
+                            return (
+                                Duration::ZERO,
+                                Err(CoreCallError::Transport("reply lost after apply".into())),
+                            );
+                        }
                         ok(json!({"applied": true}))
                     }
                     "/v1/list-nodes" => {
@@ -692,6 +716,8 @@ pub(crate) mod test_support {
                 system_proxy,
                 fail_apply,
                 reject_revision,
+                reject_routing,
+                lose_apply_reply,
                 rule_sets,
                 pins,
                 credentials_reset: Arc::default(),

@@ -466,32 +466,68 @@ impl Client {
         }
     }
 
-    /// Persists the routing mode and re-applies the running profile in it
-    /// (standard core directly, the TUN core through the service).
+    /// Commit a routing change only after the running cores accepted it.
+    /// Keep the transaction alive if its UI caller drops the request midway.
     pub(crate) async fn change_routing_mode(
         &self,
         mode: crate::RoutingMode,
     ) -> Result<(), ClientError> {
+        let client =
+            crate::session::ClientRef::upgrade(&self.this).ok_or(ClientError::Cancelled)?;
+        self.runtime
+            .spawn(async move { client.apply_routing_mode(mode).await })
+            .await
+            .map_err(|error| ClientError::failed(ErrorCode::Internal, error.to_string()))?
+    }
+
+    async fn apply_routing_mode(&self, mode: crate::RoutingMode) -> Result<(), ClientError> {
         let _switch = self.mode_switch.lock().await;
+        // A profile refresh must not apply the tentative mode during rollback.
+        let _cores = self.cores.lock().await;
         let current = self.routing.get();
         if current == mode {
             return Ok(());
         }
-        save_routing_mode(&self.config.data_dir, mode)
-            .map_err(|detail| ClientError::failed(ErrorCode::LocalStorageFailed, detail))?;
+        self.routing.set(mode);
+        let result = async {
+            self.standard.reapply().await?;
+            self.reapply_tunnel_routing().await?;
+            save_routing_mode(&self.config.data_dir, mode)
+                .map_err(|detail| ClientError::failed(ErrorCode::LocalStorageFailed, detail))
+        }
+        .await;
+        if let Err(error) = result {
+            self.routing.set(current);
+            // Either core may have accepted the tentative mode, including a
+            // connect/recovery racing this action or an update whose reply
+            // was lost. Restore both; never infer rollback from an error alone.
+            let standard = self.standard.reapply().await;
+            let tunnel = self.reapply_tunnel_routing().await;
+            let tunnel_failed =
+                self.connection.lock().unwrap().enhanced.phase == ConnectionPhase::Error;
+            if standard.is_err() || tunnel.is_err() || tunnel_failed {
+                // A failed compensation must never leave traffic using a
+                // mode different from the selection shown to the user.
+                tracing::warn!(?standard, ?tunnel, "routing mode rollback: stopping cores");
+                self.disconnect_all("routing mode rollback").await;
+                self.standard.stop().await;
+            }
+            return Err(error);
+        }
         tracing::info!(
             "routing mode: {} -> {}",
             crate::routing::wire_name(current),
             crate::routing::wire_name(mode)
         );
-        self.routing.set(mode);
         self.publish_connection(|snapshot| snapshot.routing_mode = mode);
-        let standard = self.standard.reapply().await;
-        let enhanced = match &self.tunnel {
+        Ok(())
+    }
+
+    async fn reapply_tunnel_routing(&self) -> Result<(), ClientError> {
+        match &self.tunnel {
             Some(tunnel) => tunnel.reapply().await,
             None => self.enhanced.reapply().await,
-        };
-        standard.and(enhanced)
+        }
     }
 
     /// Persists `mode`; when the connection is not off, disconnects and
