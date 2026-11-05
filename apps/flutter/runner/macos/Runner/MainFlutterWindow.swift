@@ -5,7 +5,10 @@
 // A click on a notification comes back as ppvpn://push/<id>, which the push
 // agent opens; opening the app again
 // (the Dock icon, Finder) comes as a reopen. Both go to Dart; what arrives
-// before Dart asks ("ready") is held until then.
+// before Dart asks ("ready") is held until then. The application menu's
+// Quit (⌘Q) goes to Dart as "quit" too, so that it quits as the tray's Quit
+// does: the cores stopped, a silent update handed over (#548); before Dart
+// listens it quits at once.
 //
 // It also keeps the bundled push agent registered (PushAgentService below),
 // in a packaged app (scripts/package-macos.sh), runs Sparkle (Updater
@@ -66,7 +69,40 @@ private final class Activation: NSObject {
     NotificationCenter.default.addObserver(
       self, selector: #selector(willFinishLaunching(_:)),
       name: NSApplication.willFinishLaunchingNotification, object: nil)
+    NotificationCenter.default.addObserver(
+      self, selector: #selector(didFinishLaunching(_:)),
+      name: NSApplication.didFinishLaunchingNotification, object: nil)
   }
+
+  /// The menu's terminate: items, to [quit].
+  @objc private func didFinishLaunching(_ notification: Notification) {
+    for top in NSApp.mainMenu?.items ?? [] {
+      for item in top.submenu?.items ?? []
+      where item.action == #selector(NSApplication.terminate(_:)) {
+        item.target = self
+        item.action = #selector(quit(_:))
+      }
+    }
+  }
+
+  private var quitting = false
+
+  /// Once: Dart quits within `quitLimit` (handing over a silent update
+  /// waits at most a minute for the service), else the app terminates.
+  @objc private func quit(_ sender: Any?) {
+    guard ready else {
+      NSApp.terminate(sender)
+      return
+    }
+    guard !quitting else { return }
+    quitting = true
+    channel.invokeMethod("activate", arguments: "quit")
+    DispatchQueue.main.asyncAfter(deadline: .now() + Activation.quitLimit) {
+      NSApp.terminate(nil)
+    }
+  }
+
+  private static let quitLimit: TimeInterval = 90
 
   @objc private func willFinishLaunching(_ notification: Notification) {
     let events = NSAppleEventManager.shared()

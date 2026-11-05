@@ -33,6 +33,13 @@ mod routing;
 mod saved_profile;
 mod service;
 mod session;
+pub mod silent_update;
+
+/// The log file's subscriber before a [`Client`] exists (the app's install
+/// of a silent update at launch, #548); [`Client::new`] then finds it there.
+pub fn install_logging(log_dir: &str, app_version: &str) {
+    logging::install(log_dir, app_version);
+}
 mod standard;
 mod storage;
 mod sysproxy;

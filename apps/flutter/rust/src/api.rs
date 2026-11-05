@@ -709,3 +709,120 @@ pub fn check_for_updates() {
 pub fn set_auto_check_updates(enabled: bool) -> Result<(), String> {
     crate::update::set_auto_check(enabled)
 }
+
+/// The service's side of silent updates (#548), at launch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UiSilentUpdate {
+    /// The service installs updates silently (macOS and Windows, a release
+    /// build, a service of 0.7.5 or later).
+    pub available: bool,
+    /// The service is installing one now: the app says so and quits
+    /// (docs/host-integration.md section 16.5).
+    pub installing: bool,
+    /// This build was just installed silently: 「已更新到 PPVPN {v}」, once.
+    pub updated_to: Option<String>,
+}
+
+/// The channel's release, after [`silent_update_prepare`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UiSilentPrepared {
+    UpToDate,
+    /// Downloaded and checked: installed when the app quits or is idle.
+    Ready,
+    /// No silent update for it (no package, or three failures): Sparkle's
+    /// or WinSparkle's prompt.
+    Prompt,
+    /// The pointer or the download failed: try again later.
+    Later,
+}
+
+/// Reads the service's state, and handles its last result once (the
+/// failures it counts, the notice).
+pub async fn silent_update_state() -> Result<UiSilentUpdate, String> {
+    bridge::get()?.run(crate::silent::state()).await
+}
+
+/// Checks the channel and downloads a newer package.
+pub async fn silent_update_prepare() -> Result<UiSilentPrepared, String> {
+    bridge::get()?.run(crate::silent::prepare()).await
+}
+
+/// Hands the downloaded package to the service: true when it accepted it,
+/// and the app must now exit. With `relaunch` (idle, not at quit) the
+/// service opens the app again, in the tray.
+pub async fn silent_update_install(relaunch: bool) -> Result<bool, String> {
+    bridge::get()?.run(crate::silent::install(relaunch)).await
+}
+
+/// A package downloaded and saved earlier that this launch may install
+/// (docs/host-integration.md section 16.1): the switch on, newer, not given
+/// up, not tried at a launch before. Reads the file only; before [`start`].
+#[frb(sync)]
+pub fn launch_install_pending() -> bool {
+    crate::silent::launch_install_pending()
+}
+
+/// Installs that package at launch, before [`start`]: hashes the cached
+/// copy again (never downloads), asks a service that supports silent
+/// updates and is not installing, and sends it with `relaunch`; true when
+/// the service accepted it and the app must now exit. With `hidden` (a
+/// launch into the tray) the app it opens again starts in the tray. Each
+/// build is tried at one launch only. Blocks a worker thread for at most a
+/// minute in all; on a runtime of its own, the client's is not there yet,
+/// and into the log file the client would otherwise open.
+pub fn silent_update_install_at_launch(hidden: bool) -> bool {
+    if let Ok((_, log_dir)) = crate::dirs::dirs() {
+        let app_version = format!("{}-flutter", crate::update::version());
+        ppvpn_client::install_logging(&log_dir, &app_version);
+    }
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            tracing::warn!(%error, "silent update at launch: no runtime");
+            return false;
+        }
+    };
+    runtime.block_on(crate::silent::install_at_launch(hidden))
+}
+
+/// The 「自动更新」 switch; `None` before it was first set.
+#[frb(sync)]
+pub fn auto_update() -> Option<bool> {
+    crate::silent::auto_update()
+}
+
+/// Saves the switch; false when it could not be saved. Off drops a
+/// downloaded package.
+#[frb(sync)]
+pub fn set_auto_update(enabled: bool) -> bool {
+    crate::silent::set_auto_update(enabled)
+}
+
+/// The service opened the app again after an idle install: it starts in
+/// the tray. [`clear_start_hidden`] once it is known not to be installing.
+#[frb(sync)]
+pub fn start_hidden() -> bool {
+    crate::silent::start_hidden()
+}
+
+#[frb(sync)]
+pub fn clear_start_hidden() {
+    crate::silent::clear_start_hidden();
+}
+
+/// The user quit while an idle install's request was out, and the service
+/// accepted it: marked so that the app it opens again quits.
+#[frb(sync)]
+pub fn mark_user_quit() {
+    crate::silent::mark_user_quit();
+}
+
+/// The service opened the app again after the user had quit it: it quits
+/// at once. Clears the mark.
+#[frb(sync)]
+pub fn quit_after_relaunch() -> bool {
+    crate::silent::quit_after_relaunch()
+}
