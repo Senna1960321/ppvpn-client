@@ -1,5 +1,7 @@
 # iOS-shaped memory validation, 2026-11-05
 
+Historical results. See the [November 6 follow-up](ios-memory-2026-11-06.md) for the DNS lifetime fix and current strict matrix results.
+
 This is a Linux diagnostic for [#388](https://github.com/peakpassvpn/ppvpn-client/issues/388), not iPhone acceptance. The release dependency stays on its existing tag. The candidate includes newer Sail changes that have not yet shipped in a release tag.
 
 ## Workload and provenance
