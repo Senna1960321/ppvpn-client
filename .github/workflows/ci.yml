@@ -453,6 +453,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: tools/ci-changes.sh >> "$GITHUB_OUTPUT"
+      # This job never builds Android. Leave room for the Rust target,
+      # the verified Swift toolchain and the generated client library.
+      - name: Free unused Android SDK space
+        if: steps.scope.outputs.code == 'true'
+        run: |
+          df -h / "$RUNNER_TEMP"
+          sudo du -sh /usr/local/lib/android || true
+          sudo rm -rf -- /usr/local/lib/android
+          df -h / "$RUNNER_TEMP"
       - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
         if: steps.scope.outputs.code == 'true'
         with:
