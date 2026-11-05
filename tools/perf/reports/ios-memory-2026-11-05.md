@@ -7,7 +7,7 @@ This is a Linux diagnostic for [#388](https://github.com/peakpassvpn/ppvpn-clien
 - Client engine sources: `d7f07176b80ad8ec62ced19606e31eec04bf79f7`; unchanged through the later harness revision `ebfc59e74120ecd550800e5590319d3834b0a066`.
 - Strict DNS result validation from that later revision, plus this PR's check that the iOS load really is capped at 128 completed streams.
 - Upstream Sail candidate: `ea07e9c6e59e765fca5bdb32f4183e5a86561050`, including DoT pipelining and queued send-buffer accounting fixes. Its dependency patch is [included separately](ios-memory-sail-ea07e9c6.patch).
-- Linux ARM64 VM, kernel `6.8.0-147-generic`, two Tokio workers. Release build with `--features ppvpn-core/lab`, mobile profile and `inbound.max_connections=128`. The lab feature is required: otherwise the variant environment settings are ignored.
+- Linux ARM64 VM, kernel `6.8.0-147-generic`, two Tokio workers. Cargo `--release` build with `--features ppvpn-core/lab`, Sail runtime mobile tuning and `inbound.max_connections=128`. This run did not use Cargo `--profile mobile`; subsequent validation corrects that build-profile mismatch. The lab feature is required: otherwise the variant environment settings are ignored.
 - Full harness defaults: 30 seconds idle, 100/250/500 held streams, 20-second downloads, node switches, 2,000 distinct DNS questions at 400 queries/second, rule-set refresh and warm restart. The DNS acceptance threshold remains 95%; SERVFAIL, REFUSED, truncated and unrelated replies do not count.
 - Rule sets are downloaded and verified against hashes obtained at run time. Their contents can change between runs; these measurements are snapshots, not a controlled historical speed comparison.
 
@@ -67,7 +67,7 @@ project=$(pwd)
 results=$(mktemp -d)
 sudo sh -c 'cd "$2"; ulimit -n 16384; exec python3 "$1/tools/perf/ne_mem.py" \
   --ne-mem "$1/target/release/ne-mem" --fakenode "$1/build/perf/fakenode" \
-  --loadgen "$1/build/perf/loadgen" --workers 2 --variant ios --no-default \
+  --loadgen "$1/build/perf/loadgen" --workers 2 --variant ios --no-default --dns-source public \
   --out ios-memory.json' sh "$project" "$results"
 ```
 

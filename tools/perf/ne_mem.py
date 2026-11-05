@@ -25,9 +25,10 @@ connections.
 The host's routes stay as they are but for one: TEST-NET-3 (203.0.113.0/24)
 into the TUN, which the loads dial. fakenode (-redirect) sends the node's
 dials to that range to its own sinks on loopback, so nothing loops and
-nothing leaves the host, except: the rule sets, downloaded by the engine
-from GitHub (the public sets the backend serves, about 1 MB in all), and the
-DNS scenario's DoT queries, through the node to public resolvers.
+nothing leaves the host except the rule sets downloaded from GitHub. DNS
+uses real verified TLS through the node to a local responder with a 100 ms
+delay. --dns-source public separately diagnoses the public resolver path;
+it retains the same response checks but is not a repeatable memory load.
 
 Scenarios, in this order, each a MARK line with the peak since the previous
 one (see ne-mem's doc):
@@ -50,8 +51,8 @@ failed (a connection refused, an echo short, a download empty, DNS mostly
 unanswered) is marked ✗: its numbers are not the load's. Exits 1 when the
 default (or, with --no-default, the first selected) variant fails. The ios
 variant is also checked: refused connections above its cap are expected,
-but fewer than 128 completed echoes, a stalled load, or failure below the
-cap still fails the run.
+but anything other than exactly 128 completed echoes above the cap, a
+stalled load, or failure below the cap still fails the run.
 """
 
 import argparse
@@ -59,6 +60,7 @@ import hashlib
 import json
 import os
 import platform
+import select
 import shutil
 import socket
 import struct
@@ -166,12 +168,14 @@ def profile(revision, ports, sets):
 
 
 class NeMem:
-    def __init__(self, binary, work, workers, platform_name, variant, settings, dhat=None):
+    def __init__(self, binary, work, workers, platform_name, variant, settings, dhat=None, trust_bundle=None):
         self.state = os.path.join(work, "state")
         os.makedirs(self.state, mode=0o700, exist_ok=True)
         self.log_path = os.path.join(work, f"ne-mem-{variant}-w{workers}.log")
         self.dhat = dhat
         env = dict(os.environ)
+        if trust_bundle:
+            env["SSL_CERT_FILE"] = trust_bundle
         env.pop("PPVPN_LAB_SAIL_SETTINGS", None)
         if settings:
             env["PPVPN_LAB_SAIL_SETTINGS"] = settings
@@ -310,6 +314,55 @@ DNS_RESPONSE_TIMEOUT = 11  # core DNS_TIMEOUT is 10s; allow delivery/scheduling.
 DNS_PORT = 53
 
 
+def node_command(args, work):
+    return [args.fakenode, "-dir", work, "-redirect", TEST_NET,
+            *(["-local-dns"] if args.dns_source == "local" else [])]
+
+
+def local_trust_bundle(args, ports, work):
+    if args.dns_source != "local":
+        return None
+    if not ports.get("local_dns") or ports.get("dns_delay_ms") != 100:
+        raise RuntimeError("fakenode lacks the local 100 ms DoT fixture; rebuild the benchmark tools")
+    # A separate process uses the same native loader as Sail. Its inherited
+    # SSL_CERT_FILE/DIR are honored, including macOS native trust. Only the
+    # measured engine receives the combined bundle; no global trust changes.
+    bundle = os.path.join(work, "dns-trust.pem")
+    result = subprocess.run([args.ne_mem, "--export-trust-bundle", bundle,
+                             "--extra-ca", ports["certificate"]],
+                            capture_output=True, text=True, timeout=30)
+    if result.returncode:
+        raise RuntimeError(f"export process-only DNS trust: {result.stderr.strip()}")
+    return bundle
+
+
+def node_dns_stats(node):
+    node.stdin.write("dns-stats\n")
+    node.stdin.flush()
+    if not select.select([node.stdout], [], [], 5)[0]:
+        raise RuntimeError("fakenode DNS statistics timed out")
+    try:
+        stats = json.loads(node.stdout.readline())
+        if not isinstance(stats, dict) or any(type(stats.get(key)) is not int or stats[key] < 0
+               for key in ("connections", "queries", "replies")):
+            raise ValueError("missing or invalid counters")
+        return stats
+    except (ValueError, TypeError) as error:
+        raise RuntimeError(f"invalid fakenode DNS statistics: {error}") from error
+
+
+def fixture_load(node, before, answered):
+    # WriteMsg can complete just before its success counter is incremented.
+    deadline = time.monotonic() + 0.5
+    while True:
+        after = node_dns_stats(node)
+        delta = {"fixture_" + key: after[key] - before[key]
+                 for key in ("queries", "replies", "connections")}
+        if delta["fixture_replies"] >= answered or time.monotonic() >= deadline:
+            return delta
+        time.sleep(0.01)
+
+
 def dns_burst(count, rate=400):
     """count A queries for distinct names under example.net, through the
     TUN's DNS (any address port 53 is hijacked), rate a second; returns the
@@ -384,6 +437,10 @@ def failure(row):
             return f"echo short: {load['bytes_received']} of {load['bytes_sent']} bytes"
     if "answered" in row and row["answered"] < 0.95 * row["queries"]:
         return f"DNS: {row['answered']} of {row['queries']} answered"
+    if row.get("dns_source") == "local":
+        for key in ("fixture_queries", "fixture_replies"):
+            if row.get(key, 0) < row["answered"]:
+                return f"DNS: local fixture {key} does not cover the validated replies"
     return None
 
 
@@ -413,11 +470,11 @@ def failed_loads(rows, primary, dhat=False):
             and not expected_ios_refusal(row)]
 
 
-def run(args, variant, settings, workers, ports, sizes, work):
+def run(args, variant, settings, workers, ports, sizes, work, node, trust_bundle):
     rows = []
     plat = "ios" if sys.platform == "darwin" else "android"
     before = interfaces()
-    engine = NeMem(args.ne_mem, work, workers, plat, variant, settings, args.dhat)
+    engine = NeMem(args.ne_mem, work, workers, plat, variant, settings, args.dhat, trust_bundle)
     try:
         def mark(label, **extra):
             row = engine.call("mark", label=label)
@@ -446,12 +503,12 @@ def run(args, variant, settings, workers, ports, sizes, work):
                           "-duration", f"{args.load_seconds}s")
             mark(f"conns{conns}", load=res)
 
-        for node in ("anytls", "ss"):
-            engine.call("select", node=node)
+        for node_id in ("anytls", "ss"):
+            engine.call("select", node=node_id)
             res = loadgen(args, "-target", f"{TARGET_IP}:{ports['source_port']}", "-mode", "stream",
                           "-direction", "down", "-conns", "8", "-rate-mbit", "0",
                           "-duration", f"{args.load_seconds}s")
-            mark(f"download_{node}", load=res)
+            mark(f"download_{node_id}", load=res)
 
         holder = {}
         th = threading.Thread(target=lambda: holder.update(load=loadgen(
@@ -469,9 +526,13 @@ def run(args, variant, settings, workers, ports, sizes, work):
 
         # The AnyTLS sessions the burst's upstream queries (DoT through the
         # node) open, which the session cap may or may not count.
+        before_dns = node_dns_stats(node) if args.dns_source == "local" else None
         sessions = PeakCounter(lambda: node_connections(ports["anytls_port"]))
         answered = dns_burst(args.dns_queries, args.dns_rate)
-        mark("dns", queries=args.dns_queries, answered=answered, node_sessions_peak=sessions.stop())
+        sessions_peak = sessions.stop()
+        fixture = fixture_load(node, before_dns, answered) if before_dns is not None else {}
+        mark("dns", queries=args.dns_queries, answered=answered, node_sessions_peak=sessions_peak,
+             dns_source=args.dns_source, **fixture)
 
         apply_rule_sets(engine, "ne-mem#2", ports, 1, sizes)
         mark("ruleset_refresh")
@@ -492,11 +553,13 @@ def run(args, variant, settings, workers, ports, sizes, work):
     return rows
 
 
-def table(rows, sizes):
+def table(rows, sizes, dns_source="local"):
     lines = [f"Budget: {BUDGET_MIB} MiB for ppvpn-core and sail. "
              f"Host: {platform.system()} {platform.machine()}, {os.cpu_count()} CPUs. "
              f"Rule sets (bytes, revision 1 / 2): "
              + ", ".join(f"{k} {sizes[0][k]}/{sizes[1][k]}" for k in RULE_SETS) + ".",
+             f"DNS source: {dns_source}" + (" (verified TLS, 100 ms local replies)." if dns_source == "local"
+                                           else " (public-path diagnostic; latency is uncontrolled)."),
              "",
              "| variant | workers | scenario | peak MiB | after MiB | heap peak MiB | heap after MiB | threads "
              "| RSS peak / resident MiB | source | load |",
@@ -522,6 +585,8 @@ def main():
     parser.add_argument("--load-seconds", type=int, default=20)
     parser.add_argument("--dns-queries", type=int, default=2000)
     parser.add_argument("--dns-rate", type=int, default=400, help="DNS queries a second")
+    parser.add_argument("--dns-source", choices=("local", "public"), default="local",
+                        help="local verified DoT for repeatable memory loads; public for a separate path diagnostic")
     parser.add_argument("--conns", default="100,250,500")
     parser.add_argument("--variant", action="append", default=[], metavar="NAME=SETTINGS",
                         help="also run with these sail start settings (JSON), or VARIANTS[NAME]; repeatable")
@@ -542,16 +607,17 @@ def main():
 
     sizes = [{}, {}]  # the rule sets' sizes, as last hashed
     work = tempfile.mkdtemp(prefix="ne-mem-")
-    node = subprocess.Popen([args.fakenode, "-dir", work, "-redirect", TEST_NET],
+    node = subprocess.Popen(node_command(args, work),
                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
     rows = []
     try:
         ports = json.loads(node.stdout.readline())
+        trust_bundle = local_trust_bundle(args, ports, work)
         for variant, settings in variants:
             for workers in (int(w) for w in args.workers.split(",")):
                 # A fresh state directory each run: start downloads the rule sets.
                 shutil.rmtree(os.path.join(work, "state"), ignore_errors=True)
-                rows += run(args, variant, settings, workers, ports, sizes, work)
+                rows += run(args, variant, settings, workers, ports, sizes, work, node, trust_bundle)
     finally:
         node.stdin.close()
         node.wait(timeout=10)
@@ -560,7 +626,7 @@ def main():
                 dest = shutil.copy(os.path.join(work, name), os.getcwd())
                 os.chmod(dest, 0o644)
         shutil.rmtree(work, ignore_errors=True)
-    report = table(rows, sizes)
+    report = table(rows, sizes, args.dns_source)
     print(report)
     if os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
@@ -568,7 +634,8 @@ def main():
     if args.out:
         with open(args.out, "w") as f:
             json.dump({"rows": rows, "rule_set_bytes": sizes,
-                       "variants": dict(variants)}, f, indent=1)
+                       "variants": dict(variants), "dns_source": args.dns_source,
+                       "dns_delay_ms": 100 if args.dns_source == "local" else None}, f, indent=1)
         os.chmod(args.out, 0o644)
     # dhat slows the engine enough that the DNS burst falls short (#388):
     # under --dhat only a failed transfer counts, the DNS row still shows ✗.

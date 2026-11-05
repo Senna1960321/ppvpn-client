@@ -1,13 +1,97 @@
 """Acceptance of memory measurements, without opening a TUN."""
 
 import unittest
+import io
+import os
 import socket
 import struct
+import tempfile
 import threading
 import time
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import ne_mem
+
+
+class LocalDNSFixtureTest(unittest.TestCase):
+    def test_local_fixture_is_selected_only_for_memory_loads(self):
+        args = SimpleNamespace(fakenode="node", dns_source="local")
+        self.assertIn("-local-dns", ne_mem.node_command(args, "work"))
+        args.dns_source = "public"
+        self.assertNotIn("-local-dns", ne_mem.node_command(args, "work"))
+
+    def test_public_path_does_not_export_or_add_a_ca(self):
+        with patch.object(ne_mem.subprocess, "run") as run:
+            self.assertIsNone(ne_mem.local_trust_bundle(SimpleNamespace(dns_source="public"), {}, "work"))
+        run.assert_not_called()
+
+    def test_old_or_wrong_fixture_is_rejected_before_engine_start(self):
+        args = SimpleNamespace(dns_source="local", ne_mem="engine")
+        for ports in ({}, {"local_dns": True, "dns_delay_ms": 0}):
+            with self.subTest(ports=ports), patch.object(ne_mem.subprocess, "run") as run:
+                with self.assertRaisesRegex(RuntimeError, "rebuild"):
+                    ne_mem.local_trust_bundle(args, ports, "work")
+                run.assert_not_called()
+
+    def test_trust_export_inherits_roots_and_is_scoped_to_engine_child(self):
+        args = SimpleNamespace(dns_source="local", ne_mem="engine")
+        ports = {"local_dns": True, "dns_delay_ms": 100, "certificate": "fixture.pem"}
+        inherited = {"SSL_CERT_FILE": "custom.pem", "SSL_CERT_DIR": "custom-certs"}
+        with tempfile.TemporaryDirectory() as work, patch.dict(os.environ, inherited):
+            with patch.object(ne_mem.subprocess, "run", return_value=SimpleNamespace(returncode=0)) as export:
+                bundle = ne_mem.local_trust_bundle(args, ports, work)
+            self.assertEqual(export.call_args.args[0],
+                             ["engine", "--export-trust-bundle", bundle, "--extra-ca", "fixture.pem"])
+            self.assertNotIn("env", export.call_args.kwargs)  # inherited native-loader semantics
+            process = Mock(stdout=io.StringIO('{"ok": true}\n'))
+            with patch.object(ne_mem.subprocess, "Popen", return_value=process) as start:
+                ne_mem.NeMem("engine", work, 2, "ios", "ios", "", trust_bundle=bundle)
+            child_env = start.call_args.kwargs["env"]
+            self.assertEqual(child_env["SSL_CERT_FILE"], bundle)
+            self.assertEqual(child_env["SSL_CERT_DIR"], inherited["SSL_CERT_DIR"])
+            self.assertEqual(os.environ["SSL_CERT_FILE"], inherited["SSL_CERT_FILE"])
+
+    def test_failed_native_export_fails_clearly(self):
+        args = SimpleNamespace(dns_source="local", ne_mem="engine")
+        ports = {"local_dns": True, "dns_delay_ms": 100, "certificate": "fixture.pem"}
+        with patch.object(ne_mem.subprocess, "run", return_value=SimpleNamespace(
+                returncode=2, stderr="native trust store is empty")):
+            with self.assertRaisesRegex(RuntimeError, "native trust store is empty"):
+                ne_mem.local_trust_bundle(args, ports, "work")
+
+    def test_source_counters_must_cover_every_valid_reply(self):
+        for counters in ({}, {"fixture_queries": 1999, "fixture_replies": 2000},
+                         {"fixture_queries": 2000, "fixture_replies": 1999}):
+            with self.subTest(counters=counters):
+                result = {"dns_source": "local", "queries": 2000, "answered": 2000, **counters}
+                self.assertIsNotNone(ne_mem.failure(result))
+
+    def test_both_sources_keep_the_95_percent_threshold(self):
+        for source in ("local", "public"):
+            for answered, failed in ((1899, True), (1900, False), (2000, False)):
+                with self.subTest(source=source, answered=answered):
+                    result = {"dns_source": source, "queries": 2000, "answered": answered,
+                              "fixture_queries": 2000, "fixture_replies": 2000}
+                    self.assertEqual(ne_mem.failure(result) is not None, failed)
+
+    def test_stats_are_bounded_and_malformed_data_is_rejected(self):
+        node = Mock(stdin=io.StringIO(), stdout=io.StringIO())
+        with patch.object(ne_mem.select, "select", return_value=([], [], [])):
+            with self.assertRaisesRegex(RuntimeError, "timed out"):
+                ne_mem.node_dns_stats(node)
+        for data in ("", "[]", '{}', '{"connections":0,"queries":-1,"replies":0}'):
+            node = Mock(stdin=io.StringIO(), stdout=io.StringIO(data))
+            with self.subTest(data=data), patch.object(ne_mem.select, "select", return_value=([1], [], [])):
+                with self.assertRaisesRegex(RuntimeError, "invalid fakenode"):
+                    ne_mem.node_dns_stats(node)
+
+    def test_fixture_totals_are_reported_as_per_run_deltas(self):
+        before = {"connections": 2, "queries": 4, "replies": 4}
+        after = {"connections": 3, "queries": 2004, "replies": 2004}
+        with patch.object(ne_mem, "node_dns_stats", return_value=after):
+            self.assertEqual(ne_mem.fixture_load(None, before, 2000),
+                             {"fixture_connections": 1, "fixture_queries": 2000, "fixture_replies": 2000})
 
 
 class DnsBurstTest(unittest.TestCase):
