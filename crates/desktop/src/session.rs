@@ -880,20 +880,25 @@ impl Client {
     pub(crate) async fn sign_out(&self) -> Result<(), ClientError> {
         tracing::info!("logout");
         self.auth.cancel();
-        // While the session can still authenticate.
-        self.unregister_device().await;
+        // Keep activation/refresh ordered with logout, but remove local
+        // credentials and publish SignedOut before any remote cleanup.
+        let _guard = self.auth.lock().await;
+        let unregister = self.unregister_device();
+        let logout = self.auth.begin_logout();
         self.drop_session(None, None);
         self.stop_cores().await;
-        let result = {
-            let _guard = self.auth.lock().await;
-            self.auth.logout().await
-        };
-        result.map_err(|error| self.report(error.into_client_error()))
+        // Unregister while the captured access token is still valid, then
+        // revoke its session. Neither operation may write credentials back.
+        unregister.await;
+        logout
+            .revoke()
+            .await
+            .map_err(|error| self.report(error.into_client_error()))
     }
 
     // --- authorized calls ----------------------------------------------------
 
-    fn fresh_access(&self, session: u64) -> Result<Option<String>, ClientError> {
+    pub(crate) fn fresh_access(&self, session: u64) -> Result<Option<String>, ClientError> {
         let state = self.session_state();
         if !state.signed_in || state.session != session {
             return Err(ClientError::NotSignedIn);
@@ -1459,6 +1464,14 @@ mod tests {
     }
 
     fn client(base: &str, platform: Arc<dyn PlatformHooks>) -> (Arc<Client>, String) {
+        client_on(base, platform, "macos")
+    }
+
+    fn client_on(
+        base: &str,
+        platform: Arc<dyn PlatformHooks>,
+        platform_name: &str,
+    ) -> (Arc<Client>, String) {
         let data_dir = std::env::temp_dir()
             .join(format!("ppvpn-client-test-{}", uuid::Uuid::new_v4()))
             .to_string_lossy()
@@ -1467,7 +1480,7 @@ mod tests {
             api_base: base.to_string(),
             data_dir: data_dir.clone(),
             log_dir: data_dir.clone(),
-            platform: "macos".into(),
+            platform: platform_name.into(),
             app_version: "0.0.0-test".into(),
         };
         (
@@ -1515,6 +1528,196 @@ mod tests {
             ),
             ("200 OK", FIXTURE.into()),
         ]
+    }
+
+    fn registered_client(
+        backend: &Arc<crate::test_backend::Backend>,
+        platform: &str,
+    ) -> (Arc<Client>, Arc<MemoryPlatform>, String) {
+        let base = crate::test_backend::serve(backend.clone());
+        let store = MemoryPlatform::with_blob(r#"{"version":1,"active_refresh":"jyr_old"}"#);
+        let (client, dir) = client_on(&base, store.clone(), platform);
+        if ppvpn_account::device::official_push(platform) {
+            client.set_push_token("apns-logout-coverage".into(), None);
+        }
+        crate::test_backend::wait_until(|| {
+            client.session_state().device == crate::device::DeviceState::Registered
+        });
+        (client, store, dir)
+    }
+
+    fn logout_with_unusable_access(access: &str) {
+        for platform in ["windows", "ios"] {
+            let backend = crate::test_backend::Backend::new();
+            let (client, store, dir) = registered_client(&backend, platform);
+            let refreshes = backend.requests_matching("/auth/device/refresh");
+            match access {
+                "missing" => client.session_state().access = None,
+                "stale" => {
+                    client.session_state().access.as_mut().unwrap().expires_at = Instant::now();
+                }
+                "rejected" => {
+                    *backend.unregister_status.lock().unwrap() = Some("401 Unauthorized");
+                }
+                _ => unreachable!(),
+            }
+
+            block_on(async {
+                tokio::time::timeout(Duration::from_secs(3), client.logout())
+                    .await
+                    .expect("logout must not wait for a credential refresh")
+                    .unwrap();
+            });
+            assert!(store.stored().is_none(), "{platform}/{access}");
+            assert_eq!(client.snapshot().auth, AuthState::SignedOut);
+            assert!(crate::device::read_agent_file(&dir).is_none());
+            assert_eq!(
+                backend.requests_matching("/auth/device/refresh"),
+                refreshes,
+                "{platform}/{access}: logout must not refresh credentials"
+            );
+            let removal = if ppvpn_account::device::official_push(platform) {
+                "/devices/unregister"
+            } else {
+                "DELETE /api/v1/devices/"
+            };
+            assert_eq!(
+                backend.requests_matching(removal).len(),
+                usize::from(access == "rejected"),
+                "{platform}/{access}: only a captured fresh token may be attempted, once"
+            );
+            assert_eq!(
+                backend.revoked_refreshes.lock().unwrap().as_slice(),
+                ["jyr_a"],
+                "{platform}/{access}: session revocation must still run"
+            );
+            client.shutdown();
+            drop(client);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn logout_with_missing_or_stale_access_never_refreshes_credentials() {
+        logout_with_unusable_access("missing");
+        logout_with_unusable_access("stale");
+    }
+
+    #[test]
+    fn logout_rejected_device_cleanup_does_not_refresh_credentials() {
+        logout_with_unusable_access("rejected");
+    }
+
+    fn authentication_after_logout(cancel_logout: bool) {
+        use std::future::Future;
+
+        let backend = crate::test_backend::Backend::new();
+        *backend.activation_refresh.lock().unwrap() = Some("jyr_new_session".into());
+        let (client, store, dir) = registered_client(&backend, "windows");
+        let (release, gate) = std::sync::mpsc::channel();
+        let cleanup_path = if cancel_logout {
+            *backend.revoke_gate.lock().unwrap() = Some(gate);
+            "/auth/device/revoke"
+        } else {
+            *backend.unregister_gate.lock().unwrap() = Some(gate);
+            "DELETE /api/v1/devices/"
+        };
+        let signing_out = client.clone();
+        let logout = client
+            .runtime
+            .spawn(async move { signing_out.logout().await });
+        crate::test_backend::wait_until(|| !backend.requests_matching(cleanup_path).is_empty());
+        assert!(store.stored().is_none());
+        assert_eq!(client.snapshot().auth, AuthState::SignedOut);
+
+        block_on(async {
+            let acquired = std::cell::Cell::new(false);
+            let generation = client.auth.generation();
+            // Activation uses the same credential lock as browser login.
+            // Poll once to prove it cannot acquire the lock during cleanup,
+            // without relying on a sleep or on background task scheduling.
+            let mut authentication = Box::pin(async {
+                let _guard = client.auth.lock().await;
+                acquired.set(true);
+                client
+                    .auth
+                    .activate(format!("jyr_{}", "p".repeat(48)), Some(generation))
+                    .await
+            });
+            std::future::poll_fn(|cx| {
+                assert!(authentication.as_mut().poll(cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            assert!(
+                !acquired.get(),
+                "new authentication overtook logout cleanup"
+            );
+            assert!(backend
+                .requests_matching("/auth/device/activate")
+                .is_empty());
+
+            let release = if cancel_logout {
+                logout.abort();
+                assert!(tokio::time::timeout(Duration::from_secs(3), logout)
+                    .await
+                    .unwrap()
+                    .unwrap_err()
+                    .is_cancelled());
+                Some(release)
+            } else {
+                release.send(()).unwrap();
+                tokio::time::timeout(Duration::from_secs(3), logout)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                None
+            };
+            let signed_in = tokio::time::timeout(Duration::from_secs(3), authentication)
+                .await
+                .expect("authentication must proceed once logout releases the credential lock")
+                .unwrap();
+            assert_eq!(store.stored().unwrap()["active_refresh"], "jyr_new_session");
+            client.begin_session(signed_in, false);
+            crate::test_backend::wait_until(|| {
+                client.session_state().device == crate::device::DeviceState::Registered
+            });
+            let registration = crate::device::read_agent_file(&dir).unwrap();
+
+            // The old request can finish after the new login when its caller
+            // was cancelled, but it still revokes only the captured old token.
+            if let Some(release) = release {
+                release.send(()).unwrap();
+            }
+            crate::test_backend::wait_until(|| {
+                !backend.revoked_refreshes.lock().unwrap().is_empty()
+            });
+            assert_eq!(
+                backend.revoked_refreshes.lock().unwrap().as_slice(),
+                ["jyr_a"]
+            );
+            assert_eq!(
+                store.stored().unwrap(),
+                serde_json::json!({"version": 1, "active_refresh": "jyr_new_session"})
+            );
+            assert_eq!(client.snapshot().auth, AuthState::SignedIn);
+            assert_eq!(crate::device::read_agent_file(&dir), Some(registration));
+            assert_eq!(backend.requests_matching("/devices/register").len(), 2);
+        });
+        client.shutdown();
+        drop(client);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn new_authentication_waits_for_logout_cleanup() {
+        authentication_after_logout(false);
+    }
+
+    #[test]
+    fn cancelled_logout_keeps_new_credentials_when_old_revoke_finishes() {
+        authentication_after_logout(true);
     }
 
     #[test]

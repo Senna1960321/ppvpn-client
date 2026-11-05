@@ -418,6 +418,33 @@ pub struct Auth {
     credential_lock: tokio::sync::Mutex<()>,
 }
 
+/// Remote cleanup after [`Auth::begin_logout`] attempts to remove credentials.
+/// Owns only the old session's token; it never writes to the credential store.
+pub struct PendingLogout {
+    api: Arc<Api>,
+    refresh: Option<String>,
+    cleared: Result<(), AuthError>,
+}
+
+impl PendingLogout {
+    /// Revoke the old token best effort, then return the saved local-clear result.
+    pub async fn revoke(self) -> Result<(), AuthError> {
+        if let Some(refresh) = self.refresh {
+            if let Err(error) = self
+                .api
+                .post_public::<Value>(
+                    api::PATH_DEVICE_REVOKE,
+                    &json!({ "refresh_token": refresh }),
+                )
+                .await
+            {
+                tracing::warn!("device session revoke failed: {error:?}");
+            }
+        }
+        self.cleared
+    }
+}
+
 impl Auth {
     pub fn new(api: Arc<Api>, store: Arc<dyn CredentialStore>, config: AuthConfig) -> Self {
         Self {
@@ -786,18 +813,22 @@ impl Auth {
         }))
     }
 
-    /// Cancel any login, revoke the active session (best effort) and clear
-    /// the saved credentials. Local logout is authoritative: the revoke
-    /// result is only logged.
-    pub async fn logout(&self) -> Result<(), AuthError> {
+    /// Cancel login and clear saved credentials before any network cleanup.
+    /// Like rotation, the caller must hold [`Self::lock`] across this step.
+    pub fn begin_logout(&self) -> PendingLogout {
         self.cancel();
         let active = self.credentials.get(Slot::Active);
-        if let Ok(Some(refresh)) = &active {
-            if let Err(error) = self.revoke(refresh).await {
-                tracing::warn!("device session revoke failed: {error:?}");
-            }
+        let cleared = self.credentials.clear();
+        PendingLogout {
+            api: self.api.clone(),
+            refresh: active.ok().flatten(),
+            cleared,
         }
-        self.credentials.clear()
+    }
+
+    /// Local logout is authoritative; remote revocation is best effort.
+    pub async fn logout(&self) -> Result<(), AuthError> {
+        self.begin_logout().revoke().await
     }
 }
 
@@ -1529,6 +1560,83 @@ mod tests {
         let error = auth.restore().await.unwrap_err();
         assert!(!error.is_terminal());
         assert_eq!(platform.stored().unwrap()["active_refresh"], "rt_keep");
+    }
+
+    #[tokio::test]
+    async fn interrupted_logout_does_not_restore_credentials_while_revoke_is_pending() {
+        use std::io::Read;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let (requested, request_seen) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = [0; 4096];
+            let read = socket.read(&mut request).unwrap();
+            assert!(String::from_utf8_lossy(&request[..read])
+                .starts_with("POST /api/v1/auth/device/revoke "));
+            let _ = requested.send(());
+            let _ = released.recv_timeout(Duration::from_secs(5));
+        });
+        let platform = MemoryStore::with_blob(
+            r#"{"version":1,"active_refresh":"rt_a","pending_refresh":"rt_p"}"#,
+        );
+        let account = auth(&base, platform.clone());
+        let logout = tokio::spawn(async move { account.logout().await });
+        tokio::time::timeout(Duration::from_secs(5), request_seen)
+            .await
+            .unwrap()
+            .unwrap();
+        let cleared_before_response = platform.stored().is_none();
+        logout.abort();
+        let _ = logout.await;
+        let _ = release.send(());
+        server.join().unwrap();
+        assert!(
+            cleared_before_response,
+            "logout must clear credentials before awaiting revocation"
+        );
+        assert!(auth(&base, platform).restore().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn logout_reports_local_clear_failure() {
+        struct CannotDelete(Arc<MemoryStore>);
+        impl CredentialStore for CannotDelete {
+            fn load(&self) -> Result<Option<Vec<u8>>, StoreFailure> {
+                self.0.load()
+            }
+            fn save(&self, blob: Vec<u8>) -> Result<(), StoreFailure> {
+                self.0.save(blob)
+            }
+            fn delete(&self) -> Result<(), StoreFailure> {
+                Err(StoreFailure {
+                    locked: true,
+                    message: "locked test store".into(),
+                })
+            }
+        }
+        let platform = MemoryStore::with_blob(r#"{"version":1,"active_refresh":"rt_a"}"#);
+        let (base, paths) = serve(vec![("200 OK", r#"{"revoked":true}"#.into())]);
+        let account = Auth::new(
+            Arc::new(api_with(&base, false)),
+            Arc::new(CannotDelete(platform.clone())),
+            config(),
+        );
+        let error = account.logout().await.unwrap_err();
+        assert!(matches!(
+            error,
+            AuthError::Store(StoreError { locked: true, .. })
+        ));
+        assert_eq!(platform.stored().unwrap()["active_refresh"], "rt_a");
+        assert_eq!(
+            paths.lock().unwrap().as_slice(),
+            ["POST /api/v1/auth/device/revoke"]
+        );
     }
 
     #[tokio::test]
