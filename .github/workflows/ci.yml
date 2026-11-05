@@ -991,7 +991,9 @@ jobs:
           ditto -x -k dist/macos/PPVPN-*-macos-arm64.zip "$zip"
           codesign --verify --deep --strict --verbose=2 "$zip/PPVPN.app"
           codesign -dvv "$zip/PPVPN.app" 2>&1 | grep -qx 'Authority=PPVPN CI Signing'
-          cmp "${{ steps.build.outputs.bundle }}/Contents/Info.plist" "$zip/PPVPN.app/Contents/Info.plist"
+          # Packaging adds the Sparkle settings to its private app copy.
+          # The archive must preserve that final signed plist, not the raw build.
+          cmp apps/flutter/build/macos-package-arm64/PPVPN.app/Contents/Info.plist "$zip/PPVPN.app/Contents/Info.plist"
           pkg="$RUNNER_TEMP/flutter-pkg"
           pkgutil --expand-full dist/macos/PPVPN-*-macos-arm64.pkg "$pkg"
           grep -q 'identifier="com.peakpassvpn.ppvpn.desktop.pkg"' "$pkg/PackageInfo"
