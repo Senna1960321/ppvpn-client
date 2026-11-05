@@ -44,6 +44,9 @@ use ppvpn_core::{
 };
 use serde_json::{json, Value};
 
+#[path = "ne-mem/trust.rs"]
+mod trust;
+
 /// The system allocator, counting the bytes live and their peak.
 #[cfg_attr(feature = "dhat", allow(dead_code))]
 struct Counting;
@@ -320,6 +323,16 @@ fn parse_args() -> Result<Args, String> {
 }
 
 fn main() {
+    // Export in a separate, short process: loading the platform trust store
+    // must not warm the allocator or contribute to measured engine memory.
+    if std::env::args().nth(1).as_deref() == Some("--export-trust-bundle") {
+        let command: Vec<String> = std::env::args().skip(1).collect();
+        if let Err(error) = trust::export_command(&command) {
+            eprintln!("ne-mem trust bundle: {error}");
+            std::process::exit(2);
+        }
+        return;
+    }
     let args = match parse_args() {
         Ok(args) => args,
         Err(e) => {

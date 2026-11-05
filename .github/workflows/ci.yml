@@ -359,7 +359,7 @@ jobs:
         run: |
           sudo NETNS_TIMEOUT=600 NETNS_ENV="PPVPN_E2E_FAKENODE=$PWD/build/test-tools/fakenode" \
             test/netns/run.sh --libtest /usr/lib/ppvpn/ppvpn e2e_linux::enhanced_mode_routes_and_cleanup
-      # Memory in the iOS extension's shape (#388): ne-mem in release (lab:
+      # Memory in the iOS extension's shape (#388): ne-mem in the shipped mobile profile (lab:
       # the variants' sail settings), the perf fake node and load generator,
       # tools/perf/ne_mem.py as root (sail opens the TUN; only 203.0.113.0/24
       # is routed into it). Only when the
@@ -369,13 +369,13 @@ jobs:
         timeout-minutes: 40
         run: |
           python3 -m unittest discover -s tools/perf -p '*_test.py' -v
-          (cd test && go test ./perf/loadgen)
-          cargo build --release --locked -p ppvpn-core-lab --bin ne-mem --features ppvpn-core/lab
+          (cd test && go test ./perf/loadgen ./perf/fakenode)
+          cargo build --profile mobile --locked -p ppvpn-core-lab --bin ne-mem --features ppvpn-core/lab
           mkdir -p build/perf
           (cd test && CGO_ENABLED=0 go build -trimpath -o ../build/perf/fakenode ./perf/fakenode)
           (cd test && CGO_ENABLED=0 go build -trimpath -o ../build/perf/loadgen ./perf/loadgen)
           sudo --preserve-env=GITHUB_STEP_SUMMARY sh -c 'ulimit -n 16384 && exec python3 tools/perf/ne_mem.py \
-            --ne-mem target/release/ne-mem --fakenode build/perf/fakenode --loadgen build/perf/loadgen \
+            --ne-mem target/mobile/ne-mem --fakenode build/perf/fakenode --loadgen build/perf/loadgen \
             --workers 2 --variant cap --variant ios --variant budget \
             --out ne-mem-linux.json'
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -636,7 +636,7 @@ jobs:
         run: |
           keystore=$(python3 tools/test-binary.py build/macos-tests.json keystore)
           cd crates/cli && PPVPN_TEST_KEYSTORE=1 "$keystore" --nocapture
-      # Memory in the iOS extension's shape (#388): ne-mem in release (lab:
+      # Memory in the iOS extension's shape (#388): ne-mem in the shipped mobile profile (lab:
       # the variants' sail settings), the perf fake node and load generator,
       # tools/perf/ne_mem.py as root (sail opens the TUN; only 203.0.113.0/24
       # is routed into it). Only when the
@@ -646,13 +646,13 @@ jobs:
         timeout-minutes: 40
         run: |
           python3 -m unittest discover -s tools/perf -p '*_test.py' -v
-          (cd test && go test ./perf/loadgen)
-          cargo build --release --locked -p ppvpn-core-lab --bin ne-mem --features ppvpn-core/lab
+          (cd test && go test ./perf/loadgen ./perf/fakenode)
+          cargo build --profile mobile --locked -p ppvpn-core-lab --bin ne-mem --features ppvpn-core/lab
           mkdir -p build/perf
           (cd test && CGO_ENABLED=0 go build -trimpath -o ../build/perf/fakenode ./perf/fakenode)
           (cd test && CGO_ENABLED=0 go build -trimpath -o ../build/perf/loadgen ./perf/loadgen)
           sudo --preserve-env=GITHUB_STEP_SUMMARY sh -c 'ulimit -n 16384 && exec python3 tools/perf/ne_mem.py \
-            --ne-mem target/release/ne-mem --fakenode build/perf/fakenode --loadgen build/perf/loadgen \
+            --ne-mem target/mobile/ne-mem --fakenode build/perf/fakenode --loadgen build/perf/loadgen \
             --workers 2 --variant cap --variant ios --variant budget \
             --out ne-mem-macos.json'
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

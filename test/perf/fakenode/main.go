@@ -15,6 +15,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -32,6 +33,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -52,6 +54,7 @@ const (
 func main() {
 	dir := flag.String("dir", "", "directory for the generated certificate (required)")
 	redirect := flag.String("redirect", "", "CIDR whose dials go to 127.0.0.1 instead, the port kept")
+	localDNS := flag.Bool("local-dns", false, "answer the three benchmark DoT endpoints locally, with verified TLS and 100 ms delay")
 	flag.Parse()
 	if *dir == "" {
 		log.Fatal("-dir is required")
@@ -59,6 +62,14 @@ func main() {
 	certPath, keyPath, err := writeCertificate(*dir)
 	if err != nil {
 		log.Fatal(err)
+	}
+	var dot *dnsFixture
+	if *localDNS {
+		dot, err = startDNSFixture(certPath, keyPath, 100*time.Millisecond)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer dot.listener.Close()
 	}
 	sink, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -84,12 +95,15 @@ func main() {
 	})
 	ssPort, anytlsPort := freePort(), freePort()
 	listen := badoption.Addr(netip.MustParseAddr("127.0.0.1"))
-	var route *option.RouteOptions
+	route := &option.RouteOptions{}
+	if dot != nil {
+		route.Rules = append(route.Rules, dnsRoute(uint16(dot.listener.Addr().(*net.TCPAddr).Port)))
+	}
 	if *redirect != "" {
-		route = &option.RouteOptions{Rules: []option.Rule{{Type: C.RuleTypeDefault, DefaultOptions: option.DefaultRule{
+		route.Rules = append(route.Rules, option.Rule{Type: C.RuleTypeDefault, DefaultOptions: option.DefaultRule{
 			RawDefaultRule: option.RawDefaultRule{IPCIDR: badoption.Listable[string]{*redirect}},
 			RuleAction: option.RuleAction{Action: C.RuleActionTypeRouteOptions,
-				RouteOptionsOptions: option.RouteOptionsActionOptions{OverrideAddress: "127.0.0.1"}}}}}}
+				RouteOptionsOptions: option.RouteOptionsActionOptions{OverrideAddress: "127.0.0.1"}}}})
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -117,10 +131,19 @@ func main() {
 		"ss_port": ssPort, "anytls_port": anytlsPort, "sink_port": sink.Addr().(*net.TCPAddr).Port,
 		"discard_port": discard.Addr().(*net.TCPAddr).Port, "source_port": source.Addr().(*net.TCPAddr).Port,
 		"certificate": certPath,
+		"local_dns":   dot != nil, "dns_delay_ms": 100,
 	})
 	done := make(chan os.Signal, 1)
 	signal.Notify(done, syscall.SIGINT, syscall.SIGTERM)
-	go func() { _, _ = io.Copy(io.Discard, os.Stdin); done <- syscall.SIGTERM }()
+	go func() {
+		input := bufio.NewScanner(os.Stdin)
+		for input.Scan() {
+			if strings.TrimSpace(input.Text()) == "dns-stats" && dot != nil {
+				_ = json.NewEncoder(os.Stdout).Encode(dot.stats())
+			}
+		}
+		done <- syscall.SIGTERM
+	}()
 	<-done
 }
 
@@ -171,7 +194,7 @@ func writeCertificate(dir string) (string, string, error) {
 	template := &x509.Certificate{
 		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "localhost"},
 		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(24 * time.Hour),
-		DNSNames: []string{"localhost"}, IPAddresses: []net.IP{net.ParseIP("127.0.0.1")},
+		DNSNames: []string{"localhost"}, IPAddresses: []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("1.1.1.1"), net.ParseIP("8.8.8.8"), net.ParseIP("9.9.9.9")},
 		KeyUsage: x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true, IsCA: true,
 	}

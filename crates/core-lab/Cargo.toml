@@ -11,6 +11,10 @@ publish = false
 [dependencies]
 ppvpn-core = { path = "../core" }
 base64.workspace = true
+# Match Sail's native root loader and TLS parser for the memory fixture's
+# process-only trust bundle. No certificates are installed in the system.
+rustls-native-certs = "=0.8.4"
+btls = "0.5"
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
 # The versions sail resolves (Cargo.lock), so nothing is built twice.
