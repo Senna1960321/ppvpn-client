@@ -114,7 +114,8 @@ L1 和 L2 只跑一遍（`unit`、`integration`）；`macos`、`windows` 不重�
 
 服务的更新测试可单独运行：`cargo test --locked -p ppvpn-service --bin ppvpn-service -- update::`。
 `update_guard_tests.rs` 覆盖更新各阶段拒绝 `Connect`、服务重启后安装进程的文件锁、核心启动与更新竞争、
-取消和连接失败后的锁释放，以及锁检查出错时拒绝连接。macOS 上的 `update_macos_package_tests.rs` 用
+取消和连接失败后的锁释放，以及锁检查出错时拒绝连接；还覆盖核心启动全过程持有磁盘锁、清理与安装认领的互斥、
+服务重启后的延迟安装进程、目录复用后的旧任务拒绝，以及等待应用退出时中断不计为安装失败。macOS 上的 `update_macos_package_tests.rs` 用
 系统的 `cc`、`pkgbuild`、`pkgutil` 制作并展开真实的临时 pkg，检查 helper 字节和可执行权限、签名拒绝、
 helper 及上层目录的符号链接拒绝、损坏包的拒绝；只调用 helper 准备函数，不执行安装程序，不需要 root。
 使用正式签名的 macOS 更新安装、服务替换，以及 Windows `/SERVICEUPDATE` 在 SYSTEM 下对其他会话应用的

@@ -81,8 +81,9 @@ Profile 可能由宿主暂存以完成进程间交接，但这属于宿主责任
     Administrators 的受保护 DACL，已有的就重设成这样。不满足时以 `UPDATE_UNSUPPORTED` 拒绝。每次用之前删掉
     旧的 `current`、重新建，新建失败就放弃，不用别的进程建的目录。
   - 核验、等待应用退出和安装期间，`Connect` 以 `UPDATE_IN_PROGRESS` 拒绝。更新检查与核心启动按
-    `ACTIVE` → `CORE` 的顺序互斥；服务被替换后，独立安装进程持有的 `current/lock` 仍会阻止新连接，
-    打开或检查锁失败时也拒绝连接。
+    `ACTIVE` → 暂存根目录的 `lock` → `CORE` 的顺序互斥；清理、核心启动和独立安装进程持有同一把
+    磁盘锁，锁不随 `current/` 删除。服务先取得锁时在允许连接前作废旧任务，安装进程先取得时服务不得清理或连接；
+    打开或取得锁失败时拒绝连接。安装进程还核对命令行传入的每任务随机标识，旧进程不能安装后来复用目录中的新任务。
   - 安装进程是复制到暂存目录里的服务程序，不在服务的进程组（macOS `setsid`）或控制台里，所以安装停掉服务时
     它不受影响。macOS 先把已核验的 pkg 展开到私有的 `current/payload`，从其中的
     `Payload/PPVPN.app/Contents/MacOS` 复制 `ppvpn-service-install` 和 `ppvpn-service` 到 `current/new`。
