@@ -79,7 +79,7 @@ void main() {
     await pumpUntil(tester, find.text('Connected'));
 
     // Through the second node's local proxy to the fakenode's HTTP server.
-    final proxies = await tester.runAsync(rust.localProxies);
+    final proxies = await tester.runAsync(() => rust.localProxies(generation: rust.start().localProxyGeneration!));
     final proxy = proxies!.firstWhere((p) => p.nodeId == 'ci-two');
     final body = await tester.runAsync(() => getThrough(proxy, target));
     expect(body, contains('ppvpn-e2e-ok'));

@@ -48,13 +48,79 @@ static BRIDGE: OnceLock<Bridge> = OnceLock::new();
 pub(crate) struct Events {
     pub(crate) pending: Mutex<UiEvents>,
     pub(crate) ready: Notify,
+    proxies: Mutex<ProxyGeneration>,
+}
+
+#[derive(Default)]
+struct ProxyGeneration {
+    source: Option<ProxySource>,
+    generation: u32,
+}
+
+#[derive(PartialEq, Eq)]
+struct ProxySource {
+    account: Option<String>,
+    team: Option<String>,
+    revision: String,
+}
+
+impl ProxyGeneration {
+    fn update(&mut self, snapshot: &ClientSnapshot) -> Option<u32> {
+        let source = match (&snapshot.auth, &snapshot.standard) {
+            (AuthState::SignedIn, StandardState::Ready { revision }) => Some(ProxySource {
+                account: snapshot.account.as_ref().map(|account| account.id.clone()),
+                team: snapshot.team.as_ref().map(|team| team.id.clone()),
+                revision: revision.clone(),
+            }),
+            _ => None,
+        };
+        if source != self.source {
+            self.generation = self.generation.wrapping_add(1);
+            self.source = source;
+        }
+        self.current()
+    }
+
+    fn current(&self) -> Option<u32> {
+        self.source.as_ref().map(|_| self.generation)
+    }
+}
+
+impl Events {
+    pub(crate) fn initial_snapshot(&self, read: impl FnOnce() -> ClientSnapshot) -> UiSnapshot {
+        // Serialize the initial read with the listener. If an update already
+        // arrived, use its token instead of rewinding the tracker with an
+        // earlier client snapshot captured by start().
+        let pending = self.pending.lock().unwrap();
+        pending
+            .snapshot
+            .clone()
+            .unwrap_or_else(|| self.snapshot(&read()))
+    }
+
+    fn snapshot(&self, snapshot: &ClientSnapshot) -> UiSnapshot {
+        // Track every transition before pending events are coalesced. A core
+        // restart can otherwise look like Ready(R1) -> Ready(R1) to Dart.
+        let generation = self.proxies.lock().unwrap().update(snapshot);
+        ui_snapshot(snapshot, generation)
+    }
+
+    fn check_proxy_generation(&self, generation: u32) -> Result<(), String> {
+        if self.proxies.lock().unwrap().current() == Some(generation) {
+            Ok(())
+        } else {
+            Err("local proxy configuration changed".into())
+        }
+    }
 }
 
 struct Listener(Arc<Events>);
 
 impl ClientListener for Listener {
     fn on_snapshot(&self, snapshot: ClientSnapshot) {
-        self.0.pending.lock().unwrap().snapshot = Some(ui_snapshot(&snapshot));
+        let mut pending = self.0.pending.lock().unwrap();
+        pending.snapshot = Some(self.0.snapshot(&snapshot));
+        drop(pending);
         self.0.ready.notify_one();
     }
 
@@ -211,7 +277,8 @@ impl Bridge {
 }
 
 impl Bridge {
-    pub(crate) async fn local_proxies(&self) -> Result<Vec<UiLocalProxy>, String> {
+    pub(crate) async fn local_proxies(&self, generation: u32) -> Result<Vec<UiLocalProxy>, String> {
+        self.events.check_proxy_generation(generation)?;
         let client = self.client.clone();
         let proxies = self
             .runtime
@@ -219,6 +286,7 @@ impl Bridge {
             .await
             .map_err(|error| error.to_string())?
             .map_err(|error| error.to_string())?;
+        self.events.check_proxy_generation(generation)?;
         Ok(proxies
             .into_iter()
             .map(|proxy| UiLocalProxy {
@@ -289,7 +357,7 @@ fn api_unreachable(connection: &ConnectionState) -> bool {
             .is_some_and(|reason| reason.detail == "HEALTH_API_UNREACHABLE")
 }
 
-pub(crate) fn ui_snapshot(snapshot: &ClientSnapshot) -> UiSnapshot {
+fn ui_snapshot(snapshot: &ClientSnapshot, local_proxy_generation: Option<u32>) -> UiSnapshot {
     let (auth, device_code) = match &snapshot.auth {
         AuthState::Restoring => (UiAuth::Restoring, None),
         AuthState::SignedOut => (UiAuth::SignedOut, None),
@@ -344,6 +412,7 @@ pub(crate) fn ui_snapshot(snapshot: &ClientSnapshot) -> UiSnapshot {
         line_key: connection.detail.endpoint_key.clone(),
         latency_ms: connection.detail.latency_ms,
         standard_ready: matches!(snapshot.standard, StandardState::Ready { .. }),
+        local_proxy_generation,
         selected_node_id: snapshot.selected_node_id.clone(),
         error: connection
             .reason
@@ -384,5 +453,134 @@ pub(crate) fn ui_node(node: Node) -> UiNode {
                 label: replica.label.filter(|label| !label.is_empty()),
             })
             .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ppvpn_client::{Account, ProfileSummary, Team};
+
+    fn ready(revision: &str) -> ClientSnapshot {
+        ClientSnapshot {
+            auth: AuthState::SignedIn,
+            account: Some(Account {
+                id: "account-a".into(),
+                name: "Example".into(),
+                avatar_url: None,
+                email: None,
+            }),
+            team: Some(Team {
+                id: "team-a".into(),
+                name: "Example".into(),
+                personal: true,
+                active: true,
+            }),
+            profile: Some(ProfileSummary {
+                revision: revision.into(),
+                expires_at: String::new(),
+                node_count: 1,
+            }),
+            standard: StandardState::Ready {
+                revision: revision.into(),
+            },
+            ..ClientSnapshot::default()
+        }
+    }
+
+    #[test]
+    fn proxy_generation_follows_applied_revision_not_profile_arrival() {
+        let events = Events::default();
+        let mut snapshot = ready("r1");
+        let initial = events.snapshot(&snapshot).local_proxy_generation.unwrap();
+        snapshot.profile.as_mut().unwrap().revision = "r2".into();
+        assert_eq!(
+            events.snapshot(&snapshot).local_proxy_generation,
+            Some(initial)
+        );
+        // A failed application keeps Ready(r1) and must not label its ports r2.
+        snapshot.profile_status = ProfileStatus::Invalid {
+            previous: true,
+            error: ClientErrorInfo::new(ErrorCode::StandardCoreFailed, "apply failed"),
+        };
+        assert_eq!(
+            events.snapshot(&snapshot).local_proxy_generation,
+            Some(initial)
+        );
+        snapshot.standard = StandardState::Ready {
+            revision: "r2".into(),
+        };
+        let applied = events.snapshot(&snapshot).local_proxy_generation.unwrap();
+        assert_ne!(applied, initial);
+        assert!(events.check_proxy_generation(initial).is_err());
+        assert!(events.check_proxy_generation(applied).is_ok());
+    }
+
+    #[test]
+    fn proxy_generation_survives_coalesced_restart_events() {
+        let events = Arc::new(Events::default());
+        let listener = Listener(events.clone());
+        let mut snapshot = ready("r1");
+        let initial = events.snapshot(&snapshot).local_proxy_generation.unwrap();
+        listener.on_snapshot(snapshot.clone());
+        assert_eq!(
+            events
+                .pending
+                .lock()
+                .unwrap()
+                .snapshot
+                .as_ref()
+                .unwrap()
+                .local_proxy_generation,
+            Some(initial)
+        );
+        snapshot.standard = StandardState::Stopped;
+        listener.on_snapshot(snapshot.clone());
+        assert!(events.check_proxy_generation(initial).is_err());
+        snapshot.standard = StandardState::Starting;
+        listener.on_snapshot(snapshot.clone());
+        snapshot.standard = StandardState::Ready {
+            revision: "r1".into(),
+        };
+        listener.on_snapshot(snapshot);
+        let latest = events.pending.lock().unwrap().snapshot.take().unwrap();
+        assert!(latest.standard_ready);
+        assert_ne!(latest.local_proxy_generation, Some(initial));
+    }
+
+    #[test]
+    fn initial_snapshot_uses_an_already_published_generation() {
+        let events = Arc::new(Events::default());
+        let listener = Listener(events.clone());
+        let first = events.initial_snapshot(|| ready("r1"));
+        listener.on_snapshot(ready("r2"));
+        let latest = events.initial_snapshot(|| panic!("must use the published snapshot"));
+        assert_eq!(latest.profile_revision.as_deref(), Some("r2"));
+        assert_ne!(latest.local_proxy_generation, first.local_proxy_generation);
+        assert!(events
+            .check_proxy_generation(latest.local_proxy_generation.unwrap())
+            .is_ok());
+        assert_eq!(
+            events.pending.lock().unwrap().snapshot.as_ref(),
+            Some(&latest)
+        );
+    }
+
+    #[test]
+    fn proxy_generation_invalidates_account_team_and_sign_out() {
+        let events = Events::default();
+        let mut snapshot = ready("r1");
+        let first = events.snapshot(&snapshot).local_proxy_generation;
+        snapshot.account.as_mut().unwrap().id = "account-b".into();
+        let second = events.snapshot(&snapshot).local_proxy_generation;
+        assert_ne!(first, second);
+        snapshot.team.as_mut().unwrap().id = "team-b".into();
+        let third = events.snapshot(&snapshot).local_proxy_generation;
+        assert_ne!(second, third);
+        snapshot.auth = AuthState::SignedOut;
+        assert_eq!(events.snapshot(&snapshot).local_proxy_generation, None);
+        assert!(events.check_proxy_generation(third.unwrap()).is_err());
+        snapshot.auth = AuthState::SignedIn;
+        assert_ne!(events.snapshot(&snapshot).local_proxy_generation, third);
     }
 }

@@ -96,6 +96,9 @@ pub struct UiSnapshot {
     pub latency_ms: Option<u32>,
     /// The standard-mode core runs: local proxies and speed tests work.
     pub standard_ready: bool,
+    /// Identifies the applied standard-core configuration and session. Read
+    /// [`local_proxies`] again when this changes; `None` invalidates the cache.
+    pub local_proxy_generation: Option<u32>,
     pub selected_node_id: Option<String>,
     /// Why the connection failed, else the latest failure of any action.
     pub error: Option<UiError>,
@@ -192,7 +195,8 @@ pub fn set_app_dir(path: String) {
 /// Creates the client on the first call and returns the current state.
 #[frb(sync)]
 pub fn start() -> Result<UiSnapshot, String> {
-    Ok(bridge::ui_snapshot(&bridge::start()?.client.snapshot()))
+    let bridge = bridge::start()?;
+    Ok(bridge.events.initial_snapshot(|| bridge.client.snapshot()))
 }
 
 /// Waits for the next change and returns the latest snapshot and traffic
@@ -274,10 +278,10 @@ pub async fn switch_team(team_id: String) -> Result<(), String> {
         .await
 }
 
-/// Each node's loopback proxy with its credentials (empty until the
-/// standard-mode core is ready).
-pub async fn local_proxies() -> Result<Vec<UiLocalProxy>, String> {
-    bridge::get()?.local_proxies().await
+/// Each node's loopback proxy with its credentials. Pass the snapshot's
+/// `local_proxy_generation`; a changed configuration/session rejects the read.
+pub async fn local_proxies(generation: u32) -> Result<Vec<UiLocalProxy>, String> {
+    bridge::get()?.local_proxies(generation).await
 }
 
 /// Starts the device login; the code arrives in the snapshot

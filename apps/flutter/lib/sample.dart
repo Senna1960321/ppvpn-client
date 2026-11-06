@@ -131,6 +131,7 @@ AppState sampleState() {
       lineKey: 'HKG-A',
       latencyMs: 38,
       standardReady: true,
+      localProxyGeneration: 1,
       selectedNodeId: 'hk1',
       error: null,
       unread: _sampleUnread,

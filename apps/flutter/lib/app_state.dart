@@ -140,7 +140,7 @@ class AppState {
   /// Set once [stop] runs: the event loop ends.
   bool _stopped = false;
   String? _revision;
-  bool _standardReady = false;
+  int? _proxyGeneration;
 
   Future<void> _pump() async {
     while (!_stopped) {
@@ -152,6 +152,7 @@ class AppState {
         await Future<void>.delayed(const Duration(seconds: 1));
         continue;
       }
+      if (_stopped) return;
       final next = events.snapshot;
       if (next != null) {
         _followVpn(snapshot.value.phase, next.phase);
@@ -231,13 +232,18 @@ class AppState {
         debugPrint('nodes: $error');
       }
     }
-    if (next.standardReady && !_standardReady) unawaited(_loadProxies());
-    _standardReady = next.standardReady;
+    final generation = next.localProxyGeneration;
+    if (generation != _proxyGeneration) {
+      _proxyGeneration = generation;
+      proxies.value = const {};
+      if (generation != null) unawaited(_loadProxies(generation));
+    }
   }
 
-  Future<void> _loadProxies() async {
+  Future<void> _loadProxies(int generation) async {
     try {
-      final list = await rust.localProxies();
+      final list = await rust.localProxies(generation: generation);
+      if (_stopped || generation != _proxyGeneration) return;
       proxies.value = {for (final proxy in list) proxy.nodeId: proxy};
     } catch (error) {
       debugPrint('local_proxies: $error');
@@ -308,6 +314,8 @@ class AppState {
   void stop() {
     if (_stopped) return;
     _stopped = true;
+    _proxyGeneration = null;
+    proxies.value = const {};
     rust.shutdown();
   }
 }
