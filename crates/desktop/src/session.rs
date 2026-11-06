@@ -107,6 +107,9 @@ pub(crate) struct SessionState {
     access: Option<AccessToken>,
     /// Bumped on team switch; profile downloads for an older team are dropped.
     team_epoch: u64,
+    /// Bumped when usable profiles are revoked. A delayed core acceptance
+    /// cannot restore the cache, even if a later download has recovered.
+    profile_epoch: u64,
     profile_raw: Option<Arc<Vec<u8>>>,
     nodes: Vec<Node>,
     /// Last team list from `/me/teams`, served when the current team is
@@ -146,6 +149,7 @@ impl SessionState {
     fn reset(&mut self, signed_in: bool) -> u64 {
         self.session = self.session.wrapping_add(1);
         self.team_epoch = self.team_epoch.wrapping_add(1);
+        self.profile_epoch = self.profile_epoch.wrapping_add(1);
         self.signed_in = signed_in;
         self.account_loaded = false;
         self.access = None;
@@ -177,6 +181,9 @@ pub(crate) struct CurrentProfile {
     pub(crate) raw: Arc<Vec<u8>>,
     pub(crate) revision: String,
     pub(crate) team_id: Option<String>,
+    session: u64,
+    team_epoch: u64,
+    profile_epoch: u64,
 }
 
 /// A strong [`Client`] reference held by a background task.
@@ -348,6 +355,9 @@ impl Client {
             raw,
             revision: snapshot.profile.as_ref()?.revision.clone(),
             team_id: snapshot.team.as_ref().map(|team| team.id.clone()),
+            session: state.session,
+            team_epoch: state.team_epoch,
+            profile_epoch: state.profile_epoch,
         })
     }
 
@@ -1129,6 +1139,7 @@ impl Client {
             if state.team_epoch != epoch {
                 return false;
             }
+            state.profile_epoch = state.profile_epoch.wrapping_add(1);
             state.profile_raw = None;
             state.nodes.clear();
             state.core_rejected = None;
@@ -1198,13 +1209,23 @@ impl Client {
     /// A core accepted `current`: the session falls back to it and the next
     /// launch starts from it (#532).
     pub(crate) fn mark_core_accepted(&self, current: &CurrentProfile) {
-        let session = self.session_state().session;
-        self.update_session(session, |state, _| {
+        self.update_session(current.session, |state, snapshot| {
+            if !state.signed_in
+                || state.team_epoch != current.team_epoch
+                || state.profile_epoch != current.profile_epoch
+                || state.profile_raw.is_none()
+                || snapshot.team.as_ref().map(|team| team.id.as_str()) != current.team_id.as_deref()
+            {
+                return false;
+            }
+            // The same team's newer revision may already be awaiting apply.
+            // This successful revision still becomes its last-good fallback;
+            // only a change of owner or profile validity revokes acceptance.
             let known = state
                 .accepted
                 .as_ref()
                 .is_some_and(|accepted| accepted.revision == current.revision);
-            if state.signed_in && !known {
+            if !known {
                 let accepted = SavedProfile {
                     revision: current.revision.clone(),
                     raw: current.raw.clone(),
@@ -1432,6 +1453,9 @@ impl Client {
         self.spawn_monitor(session);
     }
 }
+
+#[cfg(test)]
+mod acceptance_tests;
 
 #[cfg(test)]
 mod tests {
