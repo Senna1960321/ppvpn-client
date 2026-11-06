@@ -368,14 +368,17 @@ impl Client {
     /// Hands the latest profile to enhanced mode before a user action that
     /// needs it (the background sync may not have run yet).
     pub(crate) async fn prime_enhanced(&self) -> Result<(), ClientError> {
-        if let Some(current) = self.current_profile() {
-            match &self.tunnel {
-                Some(tunnel) => tunnel.set_profile(&current.raw, &current.revision).await?,
-                None => {
-                    self.enhanced
-                        .set_profile(&current.raw, &current.revision)
-                        .await?
-                }
+        // A disconnected controller retains its last profile. After a team
+        // switch, that must not be used until the new team has a profile.
+        let current = self.current_profile().ok_or_else(|| {
+            ClientError::failed(ErrorCode::ProfileFetchFailed, "PROFILE_NOT_READY")
+        })?;
+        match &self.tunnel {
+            Some(tunnel) => tunnel.set_profile(&current.raw, &current.revision).await?,
+            None => {
+                self.enhanced
+                    .set_profile(&current.raw, &current.revision)
+                    .await?
             }
         }
         Ok(())
@@ -786,12 +789,14 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
     use super::test_support::{FakeLauncher, NoService};
     use crate::auth::test_support::{jwt, serve, token_set, MemoryPlatform};
+    use crate::core_ipc::{ApplyChoices, BoxFuture};
+    use crate::service::{ServiceApi, ServiceError, ServiceStatus, SessionRef, VersionInfo};
     use crate::{
         AuthState, Client, ClientConfig, ClientListener, ClientSnapshot, ConnectionPhase,
         ProbeMethod, ProbeResult, StandardState, TrafficSample,
@@ -867,6 +872,15 @@ mod tests {
         launcher: Arc<FakeLauncher>,
         platform: Arc<MemoryPlatform>,
     ) -> (Arc<Client>, Arc<Recorder>, Arc<FakeLauncher>, String) {
+        signed_in_client_using(later, launcher, platform, Arc::new(NoService))
+    }
+
+    fn signed_in_client_using(
+        later: Vec<(&'static str, String)>,
+        launcher: Arc<FakeLauncher>,
+        platform: Arc<MemoryPlatform>,
+        service: Arc<dyn ServiceApi>,
+    ) -> (Arc<Client>, Arc<Recorder>, Arc<FakeLauncher>, String) {
         let mut responses = vec![
             ("200 OK", r#"{"refresh_token":"jyr_prepared"}"#.to_string()),
             ("200 OK", token_set("jyr_active")),
@@ -896,7 +910,7 @@ mod tests {
             config,
             platform,
             recorder.clone(),
-            Arc::new(NoService),
+            service,
             launcher.clone(),
             launcher.writer.clone(),
         );
@@ -1005,6 +1019,253 @@ mod tests {
         let snapshot = wait_for(&client, is_ready);
         assert_eq!(snapshot.team.unwrap().id, "t1");
         assert_eq!(*launcher.launches.lock().unwrap(), 2);
+        client.shutdown();
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    fn failed_team_profile_stops_previous_core(
+        response: Option<(&'static str, String)>,
+        expected: ErrorCode,
+    ) {
+        let can_retry = response.is_some();
+        let mut responses = vec![switch_response("t2", "Work")];
+        if let Some(response) = response {
+            responses.push(response);
+            responses.push(("200 OK", FIXTURE.replace(REVISION, "team-two")));
+        }
+        // Without a profile response the server closes the next connection.
+        let (client, _, launcher, data_dir) = signed_in_client_then(responses);
+        wait_for(&client, is_ready);
+        block_on(client.set_connection_mode(crate::ConnectionMode::Compatible)).unwrap();
+        block_on(client.connect()).unwrap();
+        assert_eq!(client.snapshot().connection.phase, ConnectionPhase::On);
+
+        let error = block_on(client.switch_team("t2".into())).unwrap_err();
+        assert_eq!(error.info().unwrap().code, expected);
+        let snapshot = client.snapshot();
+        assert_eq!(snapshot.team.as_ref().unwrap().id, "t2");
+        assert!(snapshot.profile.is_none());
+        assert!(client.nodes().is_empty());
+        assert!(
+            matches!(snapshot.standard, StandardState::Stopped),
+            "the previous team's standard core is still running: {:?}",
+            snapshot.standard
+        );
+        assert_eq!(snapshot.connection.phase, ConnectionPhase::Off);
+        assert_eq!(launcher.calls("/v1/stop"), 1);
+        assert_eq!(proxy_toggles(&launcher), vec![true, false]);
+        assert!(!backup_exists(&data_dir), "the OS proxy was not restored");
+        // Enhanced controllers keep their last profile across disconnects.
+        // Neither connect nor retry may revive it for a team with no profile.
+        block_on(client.set_connection_mode(crate::ConnectionMode::Enhanced)).unwrap();
+        for result in [
+            block_on(client.connect()),
+            block_on(client.retry()),
+            block_on(client.enhanced_take_over()),
+        ] {
+            let info = result.unwrap_err().info().unwrap();
+            assert_eq!(info.code, ErrorCode::ProfileFetchFailed);
+            assert_eq!(info.detail, "PROFILE_NOT_READY");
+        }
+
+        if can_retry {
+            block_on(client.refresh_profile()).unwrap();
+            let snapshot = wait_for(&client, is_ready);
+            assert_eq!(snapshot.team.unwrap().id, "t2");
+            assert_eq!(snapshot.profile.unwrap().revision, "team-two");
+            assert_eq!(*launcher.launches.lock().unwrap(), 2);
+            assert_eq!(snapshot.connection.phase, ConnectionPhase::Off);
+        }
+        client.shutdown();
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn team_switch_profile_server_error_stops_previous_core() {
+        failed_team_profile_stops_previous_core(
+            Some(("503 Service Unavailable", "{}".into())),
+            ErrorCode::ServerUnavailable,
+        );
+    }
+
+    #[test]
+    fn team_switch_profile_transport_error_stops_previous_core() {
+        failed_team_profile_stops_previous_core(None, ErrorCode::NetworkUnreachable);
+    }
+
+    #[test]
+    fn team_switch_profile_parse_error_stops_previous_core() {
+        failed_team_profile_stops_previous_core(
+            Some((
+                "200 OK",
+                r#"{"schema_version":1,"revision":"bad","expires_at":"2099-01-01T00:00:00Z","nodes":[{"id":"a-1","name":"x","exit":{"region":"Tokyo"}}]}"#.into(),
+            )),
+            ErrorCode::ProfileInvalid,
+        );
+    }
+
+    /// An existing privileged-service session, reattached through the real
+    /// enhanced controller so team switching exercises its disconnect path.
+    struct RestoredService {
+        running: AtomicBool,
+        disconnects: AtomicUsize,
+    }
+
+    impl RestoredService {
+        fn status(&self) -> ServiceStatus {
+            ServiceStatus {
+                running: self.running.load(Ordering::SeqCst),
+                session_id: Some("team-one-session".into()),
+                generation: 1,
+                profile_revision: Some(REVISION.into()),
+                ..ServiceStatus::default()
+            }
+        }
+    }
+
+    impl ServiceApi for RestoredService {
+        fn get_version(&self) -> BoxFuture<'_, Result<VersionInfo, ServiceError>> {
+            Box::pin(async { Ok(VersionInfo::default()) })
+        }
+        fn get_status(&self) -> BoxFuture<'_, Result<ServiceStatus, ServiceError>> {
+            Box::pin(async { Ok(self.status()) })
+        }
+        fn connect<'a>(
+            &'a self,
+            session: &'a SessionRef,
+            profile: &'a Value,
+            take_over: bool,
+            routing: crate::RoutingMode,
+            choices: &'a ApplyChoices,
+        ) -> BoxFuture<'a, Result<u32, ServiceError>> {
+            NoService.connect(session, profile, take_over, routing, choices)
+        }
+        fn update_profile<'a>(
+            &'a self,
+            _: &'a SessionRef,
+            _: &'a Value,
+            _: crate::RoutingMode,
+            _: &'a ApplyChoices,
+        ) -> BoxFuture<'a, Result<ServiceStatus, ServiceError>> {
+            Box::pin(async { Ok(self.status()) })
+        }
+        fn renew_lease<'a>(
+            &'a self,
+            _: &'a SessionRef,
+        ) -> BoxFuture<'a, Result<ServiceStatus, ServiceError>> {
+            Box::pin(async { Ok(self.status()) })
+        }
+        fn disconnect<'a>(
+            &'a self,
+            session: &'a SessionRef,
+        ) -> BoxFuture<'a, Result<(), ServiceError>> {
+            Box::pin(async move {
+                assert_eq!(session.session_id, "team-one-session");
+                assert_eq!(session.generation, 1);
+                self.running.store(false, Ordering::SeqCst);
+                self.disconnects.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+        }
+        fn core_api<'a>(
+            &'a self,
+            session: &'a SessionRef,
+            path: &'a str,
+            body: Value,
+            timeout: Duration,
+        ) -> BoxFuture<'a, Result<Value, ServiceError>> {
+            NoService.core_api(session, path, body, timeout)
+        }
+    }
+
+    #[test]
+    fn team_switch_profile_failure_disconnects_an_active_enhanced_session() {
+        let service = Arc::new(RestoredService {
+            running: AtomicBool::new(true),
+            disconnects: AtomicUsize::new(0),
+        });
+        let (client, _, launcher, data_dir) = signed_in_client_using(
+            vec![
+                switch_response("t2", "Work"),
+                ("503 Service Unavailable", "{}".into()),
+            ],
+            FakeLauncher::new(),
+            MemoryPlatform::with_blob(r#"{"version":1,"active_refresh":"jyr_old"}"#),
+            service.clone(),
+        );
+        wait_for(&client, is_ready);
+        client.enhanced.set_health_interval(Duration::from_secs(60));
+        std::fs::write(
+            std::path::Path::new(&data_dir).join(crate::storage::ENHANCED_STATE_FILE),
+            json!({
+                "generation": 1,
+                "desired": "connected",
+                "sessionId": "team-one-session",
+                "profileRevision": REVISION,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        block_on(async {
+            client.enhanced.restore().await;
+            assert_eq!(client.snapshot().connection.phase, ConnectionPhase::On);
+            let error = client.switch_team("t2".into()).await.unwrap_err();
+            assert_eq!(error.info().unwrap().code, ErrorCode::ServerUnavailable);
+            assert!(!service.running.load(Ordering::SeqCst));
+            assert_eq!(service.disconnects.load(Ordering::SeqCst), 1);
+            let snapshot = client.snapshot();
+            assert_eq!(snapshot.team.unwrap().id, "t2");
+            assert!(snapshot.profile.is_none());
+            assert!(matches!(snapshot.standard, StandardState::Stopped));
+            assert_eq!(snapshot.connection.phase, ConnectionPhase::Off);
+            assert_eq!(launcher.calls("/v1/stop"), 1);
+            assert_eq!(
+                client.connect().await.unwrap_err().info().unwrap().detail,
+                "PROFILE_NOT_READY"
+            );
+        });
+        client.shutdown();
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn team_switch_success_starts_the_new_profile_after_stopping_the_old_core() {
+        let (client, _, launcher, data_dir) = signed_in_client_then(vec![
+            switch_response("t2", "Work"),
+            ("200 OK", FIXTURE.replace(REVISION, "team-two")),
+        ]);
+        wait_for(&client, is_ready);
+        block_on(client.set_connection_mode(crate::ConnectionMode::Compatible)).unwrap();
+        block_on(client.connect()).unwrap();
+        block_on(client.switch_team("t2".into())).unwrap();
+        let snapshot = wait_for(&client, is_ready);
+        assert_eq!(snapshot.team.unwrap().id, "t2");
+        assert_eq!(snapshot.profile.unwrap().revision, "team-two");
+        assert_eq!(snapshot.connection.phase, ConnectionPhase::Off);
+        assert_eq!(launcher.calls("/v1/stop"), 1);
+        assert_eq!(*launcher.launches.lock().unwrap(), 2);
+        assert_eq!(proxy_toggles(&launcher), vec![true, false]);
+        client.shutdown();
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn team_switch_refusal_keeps_previous_core_and_connection() {
+        let (client, _, launcher, data_dir) = signed_in_client_then(vec![team_disabled()]);
+        wait_for(&client, is_ready);
+        block_on(client.set_connection_mode(crate::ConnectionMode::Compatible)).unwrap();
+        block_on(client.connect()).unwrap();
+
+        let error = block_on(client.switch_team("t2".into())).unwrap_err();
+        assert_eq!(error.info().unwrap().code, ErrorCode::TeamDisabled);
+        let snapshot = client.snapshot();
+        assert_eq!(snapshot.team.as_ref().unwrap().id, "t1");
+        assert_eq!(snapshot.profile.as_ref().unwrap().revision, REVISION);
+        assert!(is_ready(&snapshot));
+        assert_eq!(snapshot.connection.phase, ConnectionPhase::On);
+        assert_eq!(launcher.calls("/v1/stop"), 0);
+        assert_eq!(proxy_toggles(&launcher), vec![true]);
+        assert!(backup_exists(&data_dir));
         client.shutdown();
         let _ = std::fs::remove_dir_all(data_dir);
     }

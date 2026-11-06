@@ -740,7 +740,8 @@ impl Client {
         self.list_teams().await
     }
 
-    /// Switch team; refetches the profile and restarts standard mode.
+    /// Switch team; disconnects the old team before fetching the new profile.
+    /// Once standard mode is ready, the user can explicitly reconnect.
     pub async fn switch_team(&self, team_id: String) -> Result<(), ClientError> {
         self.change_team(team_id).await
     }
