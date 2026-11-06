@@ -22,6 +22,8 @@ pub use crate::service::{UpdateProgress, UpdateResult};
 const MAX_PACKAGE: u64 = 1 << 30;
 const POINTER_TIMEOUT: Duration = Duration::from_secs(30);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Bounds the request through response headers, not the streamed body.
+const HEADER_TIMEOUT: Duration = Duration::from_secs(30);
 /// A download that stalls this long is abandoned.
 const CHUNK_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -192,6 +194,7 @@ pub fn package_in_pointer(pointer: &Value, platform: &str, build: u64) -> Result
 pub struct SilentUpdater {
     service: Box<dyn ServiceApi>,
     http: reqwest::Client,
+    header_timeout: Duration,
     pointer_url: String,
     platform: &'static str,
     build: u64,
@@ -228,6 +231,7 @@ impl SilentUpdater {
         Some(Self {
             service,
             http,
+            header_timeout: HEADER_TIMEOUT,
             pointer_url,
             platform: platform()?,
             build,
@@ -284,13 +288,15 @@ impl SilentUpdater {
 
     async fn fetch(&self, package: &UpdatePackage, partial: &Path) -> Result<(), String> {
         use tokio::io::AsyncWriteExt;
-        let mut response = self
-            .http
-            .get(&package.url)
-            .send()
-            .await
-            .and_then(reqwest::Response::error_for_status)
-            .map_err(|error| format!("download: {error}"))?;
+        // A connect timeout ends at connection setup. Bound send separately
+        // so a peer that never finishes its headers cannot stall the updater.
+        // A reqwest request timeout would also limit the entire body download.
+        let mut response =
+            tokio::time::timeout(self.header_timeout, self.http.get(&package.url).send())
+                .await
+                .map_err(|_| "download: response headers timed out".to_string())?
+                .and_then(reqwest::Response::error_for_status)
+                .map_err(|error| format!("download: {error}"))?;
         let mut file = tokio::fs::File::create(partial)
             .await
             .map_err(|error| format!("{}: {error}", partial.display()))?;
@@ -513,6 +519,124 @@ mod tests {
             "bad payload",
         ] {
             assert_eq!(failure_kind(code), FailureKind::Retry, "{code}");
+        }
+    }
+
+    mod downloads {
+        use super::*;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::{TcpListener, TcpStream};
+
+        struct Cache(PathBuf);
+
+        impl Cache {
+            fn new() -> Self {
+                Self(std::env::temp_dir().join(format!("ppvpn-download-{}", uuid::Uuid::new_v4())))
+            }
+        }
+
+        impl Drop for Cache {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        fn updater(cache: &Cache) -> SilentUpdater {
+            // Exercise downloads on every host, including Linux, without
+            // invoking the platform-specific installer or any service.
+            SilentUpdater {
+                service: Box::new(ServiceClient::default()),
+                http: reqwest::Client::builder().no_proxy().build().unwrap(),
+                header_timeout: Duration::from_secs(1),
+                pointer_url: String::new(),
+                platform: "windows-x64",
+                build: 412,
+                cache: cache.0.clone(),
+            }
+        }
+
+        fn package(listener: &TcpListener) -> UpdatePackage {
+            UpdatePackage {
+                version: "0.7.6".into(),
+                build: 420,
+                file: "PPVPN-Setup.exe".into(),
+                url: format!("http://{}/PPVPN-Setup.exe", listener.local_addr().unwrap()),
+                length: 5,
+                sha256: hex::encode(Sha256::digest(b"setup")),
+                ed_signature: "test".into(),
+            }
+        }
+
+        async fn request(listener: &TcpListener) -> TcpStream {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut headers = Vec::new();
+            while !headers.ends_with(b"\r\n\r\n") {
+                headers.push(stream.read_u8().await.unwrap());
+            }
+            stream
+        }
+
+        #[tokio::test]
+        async fn stalled_headers_time_out_and_a_later_download_succeeds() {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let package = package(&listener);
+            let server = tokio::spawn(async move {
+                let mut stalled = request(&listener).await;
+                // Even a partial header must not keep the request alive.
+                stalled.write_all(b"HTTP/1.1 200 OK\r\n").await.unwrap();
+                let mut retry = request(&listener).await;
+                retry
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nsetup")
+                    .await
+                    .unwrap();
+            });
+            let cache = Cache::new();
+            let updater = updater(&cache);
+            let result = tokio::time::timeout(Duration::from_secs(5), updater.download(&package))
+                .await
+                .expect("download must finish even if the peer never finishes its headers");
+            assert_eq!(result.unwrap_err(), "download: response headers timed out");
+            assert!(!cache.0.join(&package.file).exists());
+            assert!(!cache.0.join(format!("{}.part", package.file)).exists());
+
+            let path = tokio::time::timeout(Duration::from_secs(5), updater.download(&package))
+                .await
+                .expect("a retry must not remain blocked by the previous request")
+                .unwrap();
+            assert_eq!(tokio::fs::read(&path).await.unwrap(), b"setup");
+            assert!(!cache.0.join(format!("{}.part", package.file)).exists());
+            server.await.unwrap();
+            // The verified package remains reusable after the server closes.
+            assert_eq!(updater.download(&package).await.unwrap(), path);
+        }
+
+        #[tokio::test]
+        async fn a_streaming_body_can_outlive_the_header_deadline() {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let package = package(&listener);
+            let server = tokio::spawn(async move {
+                let mut stream = request(&listener).await;
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n")
+                    .await
+                    .unwrap();
+                // Each body chunk arrives well within CHUNK_TIMEOUT, but
+                // completing the body takes longer than the header deadline.
+                for byte in b"setup" {
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    stream.write_all(&[*byte]).await.unwrap();
+                }
+            });
+            let cache = Cache::new();
+            let updater = updater(&cache);
+            let start = tokio::time::Instant::now();
+            let path = tokio::time::timeout(Duration::from_secs(5), updater.download(&package))
+                .await
+                .expect("a healthy streaming download must complete")
+                .unwrap();
+            assert!(start.elapsed() > updater.header_timeout);
+            assert_eq!(tokio::fs::read(path).await.unwrap(), b"setup");
+            server.await.unwrap();
         }
     }
 
