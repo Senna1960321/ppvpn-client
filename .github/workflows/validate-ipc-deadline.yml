@@ -1,0 +1,25 @@
+name: IPC deadline native validation
+on:
+  push:
+    branches: [codex/validate-windows-ipc-599]
+permissions:
+  contents: read
+jobs:
+  native-pipe:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: tools/desktop/ci/service-pipe-tests
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify production source receipt
+        shell: pwsh
+        run: |
+          $expected = '651c74c384abb0da996bd9b7904f909ecf2a0682b6b3c04dd0d631fa4ffb5925'
+          $actual = (Get-FileHash src/async_pipe.rs -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $expected) { throw "Production source hash mismatch" }
+          Write-Output "Production pipe source SHA256: $actual"
+      - name: Run native and shared transaction regressions
+        run: cargo test --locked -- --nocapture
