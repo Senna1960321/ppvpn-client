@@ -12,9 +12,10 @@
 //! The staging directory (root or SYSTEM only):
 //!   lock              shared by Connect, cleanup and the detached runner;
 //!                     never removed with a job
-//!   current/          the update in progress: job.json, the package, the runner and,
+//!   current/          the update in progress: job-v2.json, the package, the runner and,
 //!                     on macOS, new/ (root-only copies of the new service
 //!                     helpers)
+//!                     lock and job.json are recognized for legacy runners only
 //!   last-update.json  the last result
 // Linux has no silent updates: most of this is unused there.
 #![cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
@@ -200,7 +201,17 @@ impl Staging {
     }
 
     fn job_path(&self) -> PathBuf {
+        // Old runners ignore job ids. Never publish new work at their path,
+        // even after an old lock inode has been unlinked during cleanup.
+        self.current().join("job-v2.json")
+    }
+
+    fn legacy_job_path(&self) -> PathBuf {
         self.current().join("job.json")
+    }
+
+    fn legacy_lock_path(&self) -> PathBuf {
+        self.current().join("lock")
     }
 
     fn lock_path(&self) -> PathBuf {
@@ -256,6 +267,11 @@ fn read_job(staging: &Staging) -> Option<Job> {
     serde_json::from_slice(&std::fs::read(staging.job_path()).ok()?).ok()
 }
 
+fn read_pending_job(staging: &Staging) -> Option<Job> {
+    read_job(staging)
+        .or_else(|| serde_json::from_slice(&std::fs::read(staging.legacy_job_path()).ok()?).ok())
+}
+
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let temporary = path.with_extension("tmp");
     std::fs::write(&temporary, bytes)?;
@@ -296,25 +312,22 @@ fn record(staging: &Staging, job: &Job, outcome: Result<(), String>) {
     }
 }
 
-/// Hold the same, stable lock through cleanup, core startup or installation.
-/// A missing root is idle; all other open/lock errors fail closed. Only the
-/// service creates the private root, and the lock is never unlinked.
-fn reservation(staging: &Staging) -> std::io::Result<Option<std::fs::File>> {
-    match std::fs::symlink_metadata(&staging.root) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error),
-        Ok(_) => {}
-    }
-    if staging.system {
-        platform::trusted_dir(&staging.root).map_err(std::io::Error::other)?;
-    }
-    let lock = match platform::create_new_private_file(&staging.lock_path()) {
+/// Keep both generations of runner excluded until the operation ends. Fields
+/// drop in declaration order, releasing the legacy lock before the root lock.
+#[derive(Debug)]
+struct Reservation {
+    _legacy: Option<std::fs::File>,
+    _root: std::fs::File,
+}
+
+fn lock_file(path: &Path) -> std::io::Result<std::fs::File> {
+    let lock = match platform::create_new_private_file(path) {
         Ok(lock) => lock,
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             std::fs::OpenOptions::new()
                 .read(true)
                 .write(true)
-                .open(staging.lock_path())?
+                .open(path)?
         }
         Err(error) => return Err(error),
     };
@@ -323,10 +336,42 @@ fn reservation(staging: &Staging) -> std::io::Result<Option<std::fs::File>> {
         return Err(std::io::Error::other("update lock is not a regular file"));
     }
     match lock.try_lock() {
-        Ok(()) => Ok(Some(lock)),
+        Ok(()) => Ok(lock),
         Err(std::fs::TryLockError::WouldBlock) => Err(std::io::ErrorKind::WouldBlock.into()),
         Err(std::fs::TryLockError::Error(error)) => Err(error),
     }
+}
+
+/// A missing root is idle; all other open/lock errors fail closed. Always take
+/// the stable root lock before the legacy current/lock. An older runner can
+/// outlive the service binary it replaces and knows only the latter path.
+fn reservation(staging: &Staging) -> std::io::Result<Option<Reservation>> {
+    match std::fs::symlink_metadata(&staging.root) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+        Ok(_) => {}
+    }
+    if staging.system {
+        platform::trusted_dir(&staging.root).map_err(std::io::Error::other)?;
+    }
+    let root = lock_file(&staging.lock_path())?;
+    let legacy = match std::fs::symlink_metadata(staging.current()) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+        Ok(metadata) => {
+            if !metadata.is_dir() || platform::is_reparse_point(&metadata) {
+                return Err(std::io::Error::other("update staging is not a directory"));
+            }
+            // Create the old lock if its runner has not opened it yet. Keep
+            // this handle even if cleanup unlinks current/: a runner that
+            // already opened that inode must wait until core startup ends.
+            Some(lock_file(&staging.legacy_lock_path())?)
+        }
+    };
+    Ok(Some(Reservation {
+        _legacy: legacy,
+        _root: root,
+    }))
 }
 
 /// Both paths take ACTIVE before the disk reservation before CORE. A service
@@ -362,17 +407,19 @@ fn settle(staging: &Staging) -> std::io::Result<()> {
 }
 
 fn settle_locked(staging: &Staging) -> std::io::Result<()> {
-    if let Some(job) = read_job(staging) {
+    if let Some(job) = read_pending_job(staging) {
         if job.phase == Phase::Installing {
             record(staging, &job, Err(format!("{INSTALL_FAILED}:interrupted")));
         }
     }
     // Invalidate first, even if Windows cannot remove an old runner's exe.
     // A worker delayed before taking the lock must never install this job.
-    match std::fs::remove_file(staging.job_path()) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
+    for path in [staging.job_path(), staging.legacy_job_path()] {
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
     }
     if let Err(error) = std::fs::remove_dir_all(staging.current()) {
         if error.kind() != std::io::ErrorKind::NotFound {
@@ -383,7 +430,7 @@ fn settle_locked(staging: &Staging) -> std::io::Result<()> {
 }
 
 /// A stale runner cannot consume a new job, even if its directory was reused.
-fn claim_runner(staging: &Staging, id: &str) -> Result<(std::fs::File, Job), String> {
+fn claim_runner(staging: &Staging, id: &str) -> Result<(Reservation, Job), String> {
     if id.is_empty() {
         return Err("missing update job id".into());
     }
@@ -411,7 +458,7 @@ fn status_in(staging: &Staging) -> (Option<UpdateProgress>, Option<UpdateResult>
             Some(job) => job.progress(),
             None => match settle(staging) {
                 Ok(()) => None,
-                Err(_) => read_job(staging).and_then(|job| job.progress()),
+                Err(_) => read_pending_job(staging).and_then(|job| job.progress()),
             },
         }
     };
