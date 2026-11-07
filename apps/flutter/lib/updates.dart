@@ -26,13 +26,13 @@
 // theirs.
 
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import 'src/rust/api.dart' as rust;
+import 'update_feed.dart';
 
 const _channel = MethodChannel('ppvpn/update');
 
@@ -303,13 +303,8 @@ class Updates {
   static Future<CheckResult> _checkFeed() async {
     final feed = _feed;
     if (feed == null) return CheckResult.failed;
-    final client = HttpClient()..connectionTimeout = const Duration(seconds: 30);
-    client.userAgent = 'PPVPN/$_build (linux)';
     try {
-      final request = await client.getUrl(Uri.parse(feed));
-      final response = await request.close().timeout(const Duration(seconds: 30));
-      if (response.statusCode != HttpStatus.ok) throw HttpException('HTTP ${response.statusCode}');
-      final latest = jsonDecode(await response.transform(utf8.decoder).join());
+      final latest = await fetchUpdateFeed(Uri.parse(feed), userAgent: 'PPVPN/$_build (linux)');
       final version = latest is Map ? latest['version'] : null;
       final build = latest is Map ? _parts(latest['build']) : null;
       final installed = _parts(_build);
@@ -331,8 +326,6 @@ class Updates {
     } catch (error) {
       debugPrint('update check failed: $error');
       return CheckResult.failed;
-    } finally {
-      client.close(force: true);
     }
   }
 

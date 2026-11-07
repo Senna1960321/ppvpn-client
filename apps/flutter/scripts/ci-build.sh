@@ -312,6 +312,10 @@ grep -q '^mod frb_generated;' rust/src/lib.rs || echo 'mod frb_generated;' >> ru
 # others set PPVPN_SKIP_ANALYZE=1 (#459).
 if [ "${PPVPN_SKIP_ANALYZE:-}" != 1 ]; then
   flutter analyze --no-fatal-infos
+  if [ "$os" = linux ]; then
+    # Loopback update-feed checks need neither native bindings nor a GUI.
+    flutter test checks/update_feed_test.dart --no-pub
+  fi
 fi
 
 lib="$root/target/release"

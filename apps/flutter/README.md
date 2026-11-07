@@ -293,7 +293,9 @@ From the native apps' feeds, as they update (`lib/updates.dart`):
   repository's `latest.json` (`PPVPN_UPDATE_FEED`, else the channel's, else
   stable's on the update site) has a newer build than `PPVPN_VERSION` and
   `PPVPN_BUILD_NUMBER` baked into the bridge. A build without a build number
-  or outside a package has no notice.
+  or outside a package has no notice. Each feed request has a 30-second
+  total deadline, including the complete response body. A timed-out check
+  closes its connection, reports failure, and leaves later checks available.
 
 Builds without a feed (CI's, local ones) have updates off and no
 「检查更新…」.
