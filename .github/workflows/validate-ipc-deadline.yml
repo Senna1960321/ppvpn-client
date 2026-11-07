@@ -23,3 +23,16 @@ jobs:
           Write-Output "Production pipe source SHA256: $actual"
       - name: Run native and shared transaction regressions
         run: cargo test --locked -- --nocapture
+      - name: Verify pending-write regression detects missing cancellation
+        shell: pwsh
+        run: |
+          $source = Get-Content src/async_pipe.rs -Raw
+          if (-not $source.Contains('windows_sys::Win32::System::IO::CancelIoEx(')) { throw "Cancellation call missing" }
+          $source = $source.Replace('windows_sys::Win32::System::IO::CancelIoEx(', 'noop_cancel(')
+          $source += "`n#[cfg(windows)]`nunsafe fn noop_cancel(_: windows_sys::Win32::Foundation::HANDLE, _: *const windows_sys::Win32::System::IO::OVERLAPPED) -> i32 { 0 }`n"
+          Set-Content src/async_pipe.rs $source
+          cargo test --locked native_pipe_deadlines_close_stalled_reads_and_writes -- --nocapture 2>&1 | Tee-Object -Variable output
+          if ($LASTEXITCODE -eq 0) { throw "Regression did not detect missing write cancellation" }
+          if (($output -join "`n") -notmatch 'blocked write kept the native pipe open|assertion failed: rest.len') { throw "Control failed for an unexpected reason" }
+          Write-Output 'Expected failure confirmed: pending-write cancellation is required.'
+          exit 0
