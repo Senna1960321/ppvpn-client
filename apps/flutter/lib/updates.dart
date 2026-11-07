@@ -36,15 +36,15 @@ import 'src/rust/api.dart' as rust;
 
 const _channel = MethodChannel('ppvpn/update');
 
-/// A newer build in the Linux repository.
+/// A newer build in the Linux repository or Android APK feed.
 class UpdateNotice {
   const UpdateNotice({required this.version, required this.command});
 
   /// As shown: x.y.z, with the build when only the build differs ("0.6.4 (3)").
   final String version;
 
-  /// The upgrade command for this install's package format.
-  final String command;
+  /// Linux's upgrade command; null for APKs installed through Android's UI.
+  final String? command;
 }
 
 /// How a check the user asked for ended (Linux; WinSparkle and Sparkle show their own).

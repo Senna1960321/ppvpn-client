@@ -30,7 +30,7 @@ void main() {
     Settings.language.value = rust.UiLanguage.system;
   });
 
-  testWidgets('APK settings render available, downloading, permission, failure, and current states', (tester) async {
+  testWidgets('update settings render APK states and Linux command notices', (tester) async {
     Settings.language.value = rust.UiLanguage.english;
     Settings.version = '0.4.0 (100)';
     Updates.installs = true;
@@ -87,6 +87,17 @@ void main() {
     Updates.checked.value = CheckResult.failed;
     await tester.pump();
     expect(find.text(s('updCheckFailT')), findsOneWidget);
+
+    // Linux notices keep their package-manager command and copy action.
+    const command = 'sudo apt upgrade ppvpn';
+    Updates.notice.value = const UpdateNotice(version: '0.4.1', command: command);
+    Updates.checked.value = CheckResult.available;
+    await tester.pump();
+    expect(find.text(s('updAvailT', {'v': '0.4.1'})), findsOneWidget);
+    expect(find.text(command), findsOneWidget);
+    expect(find.text(s('copyCommand')), findsOneWidget);
+    expect(find.text(s('apkInstall')), findsNothing);
+    expect(find.text(s('apkInstallFailed')), findsNothing);
     expect(tester.takeException(), isNull);
   });
 
