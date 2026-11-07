@@ -54,5 +54,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_Networking_WinSock",
     # PeekNamedPipe: the service watch polls its pipe instead of blocking.
     "Win32_System_Pipes",
+    # Cancel outstanding request writes before dropping a timed-out pipe.
+    "Win32_System_IO",
 ] }
 
