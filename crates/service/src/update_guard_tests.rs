@@ -27,6 +27,29 @@ mod guard_tests {
             }
         }
 
+        fn legacy_job(&self, phase: Phase) -> Job {
+            std::fs::create_dir_all(self.0.current()).unwrap();
+            let mut job = serde_json::to_value(self.job(phase)).unwrap();
+            job.as_object_mut().unwrap().remove("id");
+            std::fs::write(
+                self.0.current().join("job.json"),
+                serde_json::to_vec(&job).unwrap(),
+            )
+            .unwrap();
+            serde_json::from_value(job).unwrap()
+        }
+
+        fn open_legacy_lock(&self) -> std::fs::File {
+            std::fs::create_dir_all(self.0.current()).unwrap();
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(self.0.current().join("lock"))
+                .unwrap()
+        }
+
         fn runner_lock(&self) -> std::fs::File {
             std::fs::create_dir_all(self.0.current()).unwrap();
             let lock = std::fs::OpenOptions::new()
@@ -98,6 +121,147 @@ mod guard_tests {
             guard_connect_in(Some(&fixture.0), || Ok("connected")).unwrap(),
             "connected"
         );
+    }
+
+    #[test]
+    fn legacy_runner_blocks_connect_without_a_job_id() {
+        let _serial = serial();
+        let fixture = Fixture::new("connect-legacy-runner");
+        let lock = fixture.open_legacy_lock();
+        lock.lock().unwrap();
+        let job = fixture.legacy_job(Phase::Installing);
+        assert!(job.id.is_empty());
+        let legacy_job = fixture.0.current().join("job.json");
+
+        assert_blocked(&fixture.0);
+        assert_eq!(status_in(&fixture.0), (job.progress(), None));
+        assert!(settle_if_idle(&fixture.0).is_err());
+        let signer = Signer::new();
+        let payload = download(&fixture.0.root.join("cache"), &signer, b"installer");
+        assert_eq!(
+            check_with(&fixture.0, &signer, payload, &good_checks()).err(),
+            Some(IN_PROGRESS)
+        );
+        assert!(legacy_job.is_file(), "the old runner still owns its job");
+        assert!(read_result(&fixture.0).is_none());
+        assert!(ACTIVE.lock().is_none());
+
+        drop(lock);
+        assert!(guard_connect_in(Some(&fixture.0), || Ok(())).is_ok());
+        assert!(!legacy_job.exists());
+        assert_eq!(
+            read_result(&fixture.0).unwrap().error.as_deref(),
+            Some("UPDATE_INSTALL_FAILED:interrupted")
+        );
+    }
+
+    #[test]
+    fn legacy_lock_blocks_connect_even_without_an_installing_job() {
+        let _serial = serial();
+        let fixture = Fixture::new("legacy-lock-no-job");
+        let lock = fixture.open_legacy_lock();
+        lock.lock().unwrap();
+        assert_blocked(&fixture.0);
+        let job = fixture.legacy_job(Phase::Finished);
+        record(&fixture.0, &job, Ok(()));
+        assert_blocked(&fixture.0);
+        let (_, last) = status_in(&fixture.0);
+        assert_eq!(last.unwrap().outcome, "installed");
+        drop(lock);
+        assert!(guard_connect_in(Some(&fixture.0), || Ok(())).is_ok());
+        assert_eq!(read_result(&fixture.0).unwrap().outcome, "installed");
+    }
+
+    #[test]
+    fn connect_holds_an_opened_legacy_lock_through_cleanup_and_core_start() {
+        let _serial = serial();
+        let fixture = Fixture::new("legacy-lock-connect");
+        // Model an old worker paused between open() and lock(). Cleanup may
+        // unlink its inode, but that open handle must stay locked until Connect
+        // finishes. The worker then sees no legacy job and cannot install.
+        let lock = fixture.open_legacy_lock();
+        fixture.legacy_job(Phase::Installing);
+        guard_connect_in(Some(&fixture.0), || {
+            assert!(matches!(
+                lock.try_lock(),
+                Err(std::fs::TryLockError::WouldBlock)
+            ));
+            assert!(!fixture.0.current().join("job.json").exists());
+            Ok(())
+        })
+        .unwrap();
+        lock.try_lock().unwrap();
+        assert!(!fixture.0.current().join("job.json").exists());
+    }
+
+    // Unix permits deleting and recreating current/ while the old lock's
+    // inode is still open. Windows may defer deletion until the handle closes.
+    #[cfg(unix)]
+    #[test]
+    fn a_late_legacy_runner_cannot_read_a_replacement_job() {
+        let _serial = serial();
+        let fixture = Fixture::new("legacy-runner-new-job");
+        let lock = fixture.open_legacy_lock();
+        fixture.legacy_job(Phase::Installing);
+        settle(&fixture.0).unwrap();
+        fixture.0.prepare().unwrap();
+        let replacement = fixture.job(Phase::Installing);
+        write_job(&fixture.0, &replacement).unwrap();
+
+        // The old worker can finally lock its original (possibly unlinked)
+        // inode, but its hard-coded job.json must not name the new package.
+        lock.try_lock().unwrap();
+        assert_eq!(
+            std::fs::read(fixture.0.current().join("job.json"))
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
+        drop(lock);
+        assert_eq!(
+            claim_runner(&fixture.0, &replacement.id).unwrap().1,
+            replacement
+        );
+    }
+
+    #[test]
+    fn a_legacy_runner_opening_the_reused_path_cannot_read_a_new_job() {
+        let _serial = serial();
+        let fixture = Fixture::new("legacy-runner-reopened");
+        fixture.legacy_job(Phase::Installing);
+        settle(&fixture.0).unwrap();
+        fixture.0.prepare().unwrap();
+        let replacement = fixture.job(Phase::Installing);
+        write_job(&fixture.0, &replacement).unwrap();
+        // An old worker that only opens the path after replacement still
+        // cannot find work, even though it does not check the job id.
+        let reopened = fixture.open_legacy_lock();
+        reopened.try_lock().unwrap();
+        assert!(!fixture.0.current().join("job.json").exists());
+        drop(reopened);
+        assert_eq!(
+            claim_runner(&fixture.0, &replacement.id).unwrap().1,
+            replacement
+        );
+    }
+
+    #[test]
+    fn legacy_lock_errors_cannot_discard_or_replace_a_pending_job() {
+        let _serial = serial();
+        let fixture = Fixture::new("legacy-lock-error");
+        fixture.legacy_job(Phase::Installing);
+        std::fs::create_dir(fixture.0.current().join("lock")).unwrap();
+        assert_blocked(&fixture.0);
+        assert!(settle_if_idle(&fixture.0).is_err());
+        assert!(fixture.0.current().join("job.json").is_file());
+        assert!(read_result(&fixture.0).is_none());
+        // Failure to take the legacy lock releases the root reservation.
+        let root = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(fixture.0.lock_path())
+            .unwrap();
+        root.try_lock().unwrap();
     }
 
     #[test]
