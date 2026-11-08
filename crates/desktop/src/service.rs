@@ -24,6 +24,11 @@ use crate::core_ipc::{ApplyChoices, BoxFuture, CoreCallError, CoreTransport};
 use crate::errors::{ClientErrorInfo, ErrorCode};
 use crate::RoutingMode;
 
+#[cfg(unix)]
+mod unix_request;
+#[cfg(all(unix, test))]
+mod unix_request_tests;
+
 /// Named pipe served by the Windows service.
 #[cfg(windows)]
 pub(crate) const SERVICE_ENDPOINT: &str = r"\\.\pipe\ppvpn-service";
@@ -836,6 +841,7 @@ impl ServiceClient {
     /// One framed request/response. `handshake`: the first exchange of a
     /// session, where a close before any answer means the service refused
     /// this app's identity.
+    #[cfg(not(unix))]
     async fn transact(
         &self,
         request: Request,
@@ -857,6 +863,22 @@ impl ServiceClient {
             Ok(Err(error)) => return Err(ServiceError::Protocol(format!("service task: {error}"))),
             Ok(Ok(result)) => result?,
         };
+        serde_json::from_slice(&bytes)
+            .map_err(|error| ServiceError::Protocol(format!("parse response: {error}")))
+    }
+
+    /// The Unix socket belongs to the request future: cancellation and the
+    /// whole-transaction deadline both close it, without a detached worker.
+    #[cfg(unix)]
+    async fn transact(
+        &self,
+        request: Request,
+        timeout: Duration,
+        handshake: bool,
+    ) -> Result<Response, ServiceError> {
+        let body = serde_json::to_vec(&request)
+            .map_err(|error| ServiceError::Protocol(format!("encode request: {error}")))?;
+        let bytes = unix_request::transact(&self.endpoint, &body, timeout, handshake).await?;
         serde_json::from_slice(&bytes)
             .map_err(|error| ServiceError::Protocol(format!("parse response: {error}")))
     }
@@ -934,6 +956,7 @@ fn verify_response(
 
 /// Writes `[u32 BE length]` and the body as two writes (what the service
 /// expects), then reads the framed response.
+#[cfg(any(windows, test))]
 fn exchange<S: std::io::Read + std::io::Write>(
     stream: &mut S,
     body: &[u8],
@@ -954,6 +977,7 @@ fn exchange<S: std::io::Read + std::io::Write>(
 /// A close before any byte of the handshake answer is how the service
 /// rejects an app it does not trust ([`ServiceError::Rejected`]); any other
 /// short read is a protocol failure.
+#[cfg(any(windows, test))]
 fn read_frame<R: std::io::Read>(reader: &mut R, handshake: bool) -> Result<Vec<u8>, ServiceError> {
     let mut length = [0u8; 4];
     let mut filled = 0;
@@ -997,22 +1021,6 @@ fn read_frame<R: std::io::Read>(reader: &mut R, handshake: bool) -> Result<Vec<u
         }
     })?;
     Ok(body)
-}
-
-#[cfg(unix)]
-fn blocking_transact(
-    endpoint: &str,
-    body: &[u8],
-    timeout: Duration,
-    handshake: bool,
-) -> Result<Vec<u8>, ServiceError> {
-    use std::os::unix::net::UnixStream;
-
-    let mut stream = UnixStream::connect(endpoint)
-        .map_err(|error| ServiceError::Unavailable(format!("connect {endpoint}: {error}")))?;
-    stream.set_read_timeout(Some(timeout)).ok();
-    stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
-    exchange(&mut stream, body, handshake)
 }
 
 #[cfg(windows)]
