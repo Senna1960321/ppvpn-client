@@ -62,6 +62,13 @@ class MessagesView {
 /// when the inbox does not have it) the push itself, read-only.
 typedef OpenRequest = ({int? messageId, rust.UiMessage push});
 
+class _ReadChanges {
+  _ReadChanges(this.confirmed);
+
+  bool confirmed;
+  final pending = <({int operation, bool read})>[];
+}
+
 class MessagesState {
   MessagesState({required this.fixed, required this.onError});
 
@@ -83,6 +90,12 @@ class MessagesState {
 
   /// Bumped by [reload]: answers to an older load are dropped.
   int _generation = 0;
+
+  // Follow the visible message objects, not just their IDs: a refreshed
+  // message (or another account's inbox) must not inherit old rollbacks.
+  // Expando does not retain messages after the list is cleared/replaced.
+  var _readChanges = Expando<_ReadChanges>();
+  int _readOperation = 0;
 
   /// The failed load was a further page (retry loads it again).
   bool _failedMore = false;
@@ -136,6 +149,7 @@ class MessagesState {
       final page = await rust.notifications(page: 1, pageSize: pageSize);
       if (generation != _generation) return;
       _pages = 1;
+      _readChanges = Expando<_ReadChanges>();
       view.value = MessagesView(items: page.items, total: page.total, loaded: true);
     } catch (error) {
       if (generation != _generation) return;
@@ -192,28 +206,29 @@ class MessagesState {
 
   Future<void> setRead(rust.UiMessage message, bool read) async {
     if (message.read == read) return;
-    _replace(message.id, read);
-    if (fixed) return;
+    final operation = _beginRead(read, id: message.id);
     try {
-      if (read) {
-        await rust.markNotificationRead(id: message.id);
-      } else {
-        await rust.markNotificationUnread(id: message.id);
+      if (!fixed) {
+        if (read) {
+          await rust.markNotificationRead(id: message.id);
+        } else {
+          await rust.markNotificationUnread(id: message.id);
+        }
       }
+      _finishRead(operation, succeeded: true);
     } catch (error) {
-      _replace(message.id, !read);
+      _finishRead(operation, succeeded: false);
       onError('$error');
     }
   }
 
   Future<void> markAllRead() async {
-    final before = view.value.items;
-    view.value = view.value.copyWith(items: [for (final message in before) _withRead(message, true)]);
-    if (fixed) return;
+    final operation = _beginRead(true);
     try {
-      await rust.markAllNotificationsRead();
+      if (!fixed) await rust.markAllNotificationsRead();
+      _finishRead(operation, succeeded: true);
     } catch (error) {
-      view.value = view.value.copyWith(items: before);
+      _finishRead(operation, succeeded: false);
       onError('$error');
     }
   }
@@ -226,10 +241,49 @@ class MessagesState {
     unawaited(setRead(message, true));
   }
 
-  void _replace(int id, bool read) {
+  int _beginRead(bool read, {int? id}) {
+    final operation = ++_readOperation;
     view.value = view.value.copyWith(
-      items: [for (final message in view.value.items) message.id == id ? _withRead(message, read) : message],
+      items: [for (final message in view.value.items)
+        if (id == null || message.id == id)
+          _optimisticRead(message, operation, read)
+        else
+          message],
     );
+    return operation;
+  }
+
+  rust.UiMessage _optimisticRead(rust.UiMessage message, int operation, bool read) {
+    final changes = _readChanges[message] ?? _ReadChanges(message.read);
+    changes.pending.add((operation: operation, read: read));
+    final updated = _withRead(message, read);
+    _readChanges[updated] = changes;
+    return updated;
+  }
+
+  void _finishRead(int operation, {required bool succeeded}) {
+    var changed = false;
+    final items = view.value.items.map((message) {
+      final changes = _readChanges[message];
+      if (changes == null) return message;
+      final index = changes.pending.indexWhere((change) => change.operation == operation);
+      if (index < 0) return message;
+      if (succeeded) {
+        // A later successful user action supersedes earlier actions even
+        // when their requests complete afterwards. Later pending actions
+        // still win; if they fail, this becomes their rollback baseline.
+        changes.confirmed = changes.pending[index].read;
+        changes.pending.removeRange(0, index + 1);
+      } else {
+        changes.pending.removeAt(index);
+      }
+      final read = changes.pending.isEmpty ? changes.confirmed : changes.pending.last.read;
+      final updated = _withRead(message, read);
+      if (changes.pending.isNotEmpty) _readChanges[updated] = changes;
+      changed = true;
+      return updated;
+    }).toList();
+    if (changed) view.value = view.value.copyWith(items: items);
   }
 
   static rust.UiMessage _withRead(rust.UiMessage message, bool read) => rust.UiMessage(
