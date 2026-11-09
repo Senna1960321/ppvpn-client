@@ -731,6 +731,7 @@ jobs:
         run: |
           cargo test -p ppvpn-core --lib --locked --target x86_64-pc-windows-msvc -- hostipv6::windows localdns::source probe::icmp
           cargo test -p ppvpn-desktop --lib --locked --target x86_64-pc-windows-msvc -- detect service sysproxy
+          cargo test -p ppvpn-desktop --lib --locked --target x86_64-pc-windows-msvc -- enhanced::tests::control_health --test-threads=1 --nocapture
           cargo test -p ppvpn-push-agent --locked --target x86_64-pc-windows-msvc
           cargo test -p ppvpn-service --bin ppvpn-service --locked --target x86_64-pc-windows-msvc -- update::
       # The release's Windows signing scripts (#489), which sign only in a

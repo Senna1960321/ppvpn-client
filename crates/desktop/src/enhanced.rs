@@ -152,9 +152,9 @@ const HEALTH_RECHECK: Duration = if cfg!(test) {
 } else {
     Duration::from_secs(5)
 };
-/// Detail of the health failure where the direct request to the API host
-/// failed and the tunnel's own steps passed (see [`official_verdict`]), and
-/// of the reason `On` carries meanwhile.
+/// The control endpoint is unavailable while the forwarding checks pass
+/// (including completed HTTP5xx exchanges). Also the reason `On` carries.
+/// See [`official_verdict`].
 const API_UNREACHABLE: &str = "HEALTH_API_UNREACHABLE";
 /// Detail of the `Contended` that ends those reconnects.
 const TUN_ROUTING_TAKEN_OVER: &str = "TUN_ROUTING_TAKEN_OVER";
@@ -164,10 +164,25 @@ const PREFLIGHT_BUDGET: Duration = if cfg!(test) {
     Duration::from_millis(1_500)
 };
 
-/// The official host's direct and proxied results, scripted (tests).
+/// A valid HTTP exchange can prove the path even when the control service
+/// cannot serve requests. Keep that separate from dial/TLS/transport failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HealthEndpoint {
+    Healthy,
+    Unavailable(u16),
+}
+type EndpointResult = Result<HealthEndpoint, ClientErrorInfo>;
+
+#[derive(Debug)]
+struct DirectHealth {
+    remote: Option<std::net::SocketAddr>,
+    endpoint: HealthEndpoint,
+}
+
+/// The official host's direct and proxied exchanges, scripted (tests).
 #[cfg(test)]
 pub(crate) type OfficialSteps =
-    Arc<dyn Fn() -> (Result<(), ClientErrorInfo>, Result<(), ClientErrorInfo>) + Send + Sync>;
+    Arc<dyn Fn() -> BoxFuture<'static, (EndpointResult, EndpointResult)> + Send + Sync>;
 
 /// Looks for other apps' tunnels (blocking; run off the async threads).
 pub(crate) type Detector = Arc<dyn Fn() -> ConflictReport + Send + Sync>;
@@ -1933,14 +1948,16 @@ impl Inner {
         }
 
         #[cfg(test)]
-        if let Some(scripted) = self
-            .official_steps
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
         {
-            let (direct, proxied) = scripted();
-            return official_verdict(direct, proxied);
+            let scripted = self
+                .official_steps
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            if let Some(scripted) = scripted {
+                let (direct, proxied) = scripted().await;
+                return official_verdict(direct, proxied);
+            }
         }
         let Some(target) = health_url(&self.config.api_base) else {
             return Ok(());
@@ -1948,19 +1965,7 @@ impl Inner {
 
         let host = target.host_str().unwrap_or("");
         let before = capture_baseline(core, started, host).await?;
-        let direct = direct_health_request(target.clone()).await;
-        let done = SystemTime::now();
-        steps.done("direct request");
-        // A failed direct request leaves nothing to judge the capture by;
-        // the proxied path still runs and decides what the failure means.
-        let direct = match direct {
-            Ok(remote) => {
-                capture_verdict(core, before, done, remote, host).await?;
-                steps.done("capture check");
-                Ok(())
-            }
-            Err(error) => Err(error),
-        };
+        let direct = checked_direct_health(core, before, target.clone(), &mut steps).await?;
         let proxied = self.proxied_path(&node_id, &target).await;
         steps.done("proxied-path probe");
         official_verdict(direct, proxied)
@@ -1970,11 +1975,7 @@ impl Inner {
     /// core's local proxy. The privileged core runs TUN only
     /// (`--local-proxy=false`), so the path is exercised through the
     /// standard core.
-    async fn proxied_path(
-        &self,
-        node_id: &str,
-        target: &reqwest::Url,
-    ) -> Result<(), ClientErrorInfo> {
+    async fn proxied_path(&self, node_id: &str, target: &reqwest::Url) -> EndpointResult {
         let standard = self
             .standard
             .as_ref()
@@ -1987,15 +1988,12 @@ impl Inner {
                 .map_err(|error| {
                     health_error(format!("HEALTH_PROXY_PATH_FAILED: {}", error.detail()))
                 })?;
-        if availability.get("success").and_then(Value::as_bool) != Some(true) {
-            return Err(health_error("HEALTH_PROXY_PATH_FAILED"));
-        }
-        Ok(())
+        proxied_health_verdict(&availability)
     }
 
-    /// While on: `On` carries [`API_UNREACHABLE`] as its reason while only
-    /// the API host is unreachable on the direct path, and none once a
-    /// check passes. Nothing changes for another generation or phase.
+    /// While on: `On` carries [`API_UNREACHABLE`] while the control endpoint
+    /// is unavailable, and none once a check passes. Nothing changes for
+    /// another generation or phase.
     fn note_api_unreachable(&self, generation: u64, unreachable: bool) {
         let reason = unreachable.then(|| service_unreachable(API_UNREACHABLE));
         let applied = self.with_data(|data| {
@@ -2309,29 +2307,51 @@ fn is_path_cause(info: &ClientErrorInfo) -> bool {
     }
 }
 
-/// What the official host's direct request and proxied-path probe say
-/// together. The proxied path failing is the tunnel's failure (with the
-/// direct request's reason when that failed too, as before). The proxied
-/// path working while the direct request failed means the API host is not
-/// reachable on the direct path, e.g. a lossy route from the ISP to it
-/// (the profile routes it DIRECT): the tunnel works (#438).
+/// Separate control-service HTTP errors from proxy transport failure. A valid
+/// HTTP 5xx through the proxy still proves the forwarding path; restarting the
+/// instance cannot repair that service. Direct responses have already passed
+/// capture validation. A failed proxy transport retains the recovery policy.
 fn official_verdict(
-    direct: Result<(), ClientErrorInfo>,
-    proxied: Result<(), ClientErrorInfo>,
+    direct: EndpointResult,
+    proxied: EndpointResult,
 ) -> Result<(), ClientErrorInfo> {
     match (direct, proxied) {
-        (Ok(()), Ok(())) => Ok(()),
+        (Ok(HealthEndpoint::Healthy), Ok(HealthEndpoint::Healthy)) => Ok(()),
+        // A real proxy transport failure still calls for recovery, including
+        // when the direct path obtained an HTTP service error.
+        (Ok(_), Err(proxied)) => Err(proxied),
         (Err(direct), Err(_)) => Err(direct),
-        (Ok(()), Err(proxied)) => Err(proxied),
-        (Err(direct), Ok(())) => Err(service_unreachable(format!(
+        (Err(direct), Ok(_)) => Err(service_unreachable(format!(
             "{API_UNREACHABLE}: {}",
             direct.detail
+        ))),
+        (Ok(HealthEndpoint::Unavailable(status)), Ok(_)) => Err(service_unreachable(format!(
+            "{API_UNREACHABLE}: HEALTH_DIRECT_STATUS_FAILED: {status}"
+        ))),
+        (Ok(_), Ok(HealthEndpoint::Unavailable(status))) => Err(service_unreachable(format!(
+            "{API_UNREACHABLE}: HEALTH_PROXY_STATUS_FAILED: {status}"
         ))),
     }
 }
 
-/// Only the API host is unreachable on the direct path (see
-/// [`official_verdict`]).
+fn proxied_health_verdict(availability: &Value) -> EndpointResult {
+    if availability.get("success").and_then(Value::as_bool) == Some(true) {
+        return Ok(HealthEndpoint::Healthy);
+    }
+    // Only the core's completed HTTP exchange result can establish a service
+    // error. A stale/malformed status beside a TLS/dial failure cannot do so.
+    if availability.get("success").and_then(Value::as_bool) == Some(false)
+        && availability.get("error_code").and_then(Value::as_str) == Some("HTTP_STATUS")
+    {
+        if let Some(status @ 500..=599) = availability.get("http_status").and_then(Value::as_u64) {
+            return Ok(HealthEndpoint::Unavailable(status as u16));
+        }
+    }
+    Err(health_error("HEALTH_PROXY_PATH_FAILED"))
+}
+
+/// The control endpoint is unavailable while the forwarding path works
+/// (see [`official_verdict`]).
 fn is_api_unreachable(info: &ClientErrorInfo) -> bool {
     info.code == ErrorCode::ConnectHealthCheckFailed && info.detail.starts_with(API_UNREACHABLE)
 }
@@ -2398,10 +2418,9 @@ fn health_url(api_base: &str) -> Option<reqwest::Url> {
 }
 
 /// The DIRECT step of the health transaction: a bare GET (no cookies, no
-/// credentials, no proxy, no redirects, no caches) that must answer 2xx.
-async fn direct_health_request(
-    target: reqwest::Url,
-) -> Result<Option<std::net::SocketAddr>, ClientErrorInfo> {
+/// credentials, no proxy, no redirects, no caches). A completed 5xx is a
+/// control-service failure with a working transport; its capture is still checked.
+async fn direct_health_request(target: reqwest::Url) -> Result<DirectHealth, ClientErrorInfo> {
     let client = reqwest::Client::builder()
         .timeout(HEALTH_REQUEST_TIMEOUT)
         .connect_timeout(HEALTH_REQUEST_TIMEOUT)
@@ -2416,16 +2435,51 @@ async fn direct_health_request(
         .send()
         .await
         .map_err(|_| service_unreachable("HEALTH_DIRECT_PATH_FAILED"))?;
-    if !response.status().is_success() {
+    let status = response.status();
+    if !status.is_success() && !status.is_server_error() {
         return Err(service_unreachable(format!(
             "HEALTH_DIRECT_STATUS_FAILED: {}",
-            response.status().as_u16()
+            status.as_u16()
         )));
     }
     // Where the request went: what to look at when the capture check fails.
     let remote = response.remote_addr();
     let _ = response.bytes().await;
-    Ok(remote)
+    Ok(DirectHealth {
+        remote,
+        endpoint: if status.is_server_error() {
+            HealthEndpoint::Unavailable(status.as_u16())
+        } else {
+            HealthEndpoint::Healthy
+        },
+    })
+}
+
+async fn checked_direct_health(
+    core: &dyn CoreTransport,
+    before: CoreTraffic,
+    target: reqwest::Url,
+    steps: &mut Steps,
+) -> Result<EndpointResult, ClientErrorInfo> {
+    let response = direct_health_request(target.clone()).await;
+    let done = SystemTime::now();
+    steps.done("direct request");
+    let response = match response {
+        Ok(response) => response,
+        Err(error) => return Ok(Err(error)),
+    };
+    // A 5xx exchanged real traffic and must satisfy the same capture check as
+    // a 2xx. A control-plane outage cannot hide a leak or stale counters.
+    capture_verdict(
+        core,
+        before,
+        done,
+        response.remote,
+        target.host_str().unwrap_or(""),
+    )
+    .await?;
+    steps.done("capture check");
+    Ok(Ok(response.endpoint))
 }
 
 /// Detail of the health failure when the TUN core's traffic counters were
@@ -2796,15 +2850,15 @@ async fn health_loop(inner: Arc<Inner>, session: SessionRef) {
         }
         awaiting_verdict = false;
         match health.judge(round) {
-            // The tunnel works; only the API host is unreachable on the
-            // direct path. Restarting the core cannot fix that route: stay
-            // on, say so, and check less often (#438).
+            // Forwarding works but the control endpoint is unavailable.
+            // Replacing the core cannot repair that service: stay on, say
+            // so, and check less often (#438).
             Verdict::ApiUnreachable { misses } => {
                 tracing::info!(
                     generation,
                     misses,
                     detail = %result.as_ref().err().map_or("", |e| e.detail.as_str()),
-                    "enhanced health: the tunnel works but the API host is unreachable on the direct path; staying on"
+                    "enhanced health: the forwarding path works but the control endpoint is unavailable; staying on"
                 );
                 inner.note_api_unreachable(generation, true);
                 // A healthy round for the tunnel (and the recovery episode).
@@ -2893,6 +2947,7 @@ async fn pinned_ingress(core: &dyn CoreTransport, pins: &crate::ingress::Pins) -
 
 #[cfg(test)]
 mod tests {
+    mod control_health;
     use super::*;
     use crate::service::{ServiceStatus, VersionInfo};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -3238,6 +3293,9 @@ mod tests {
 
     #[derive(Default)]
     struct FakeService {
+        /// A real loopback-only forwarder in the control-health regression.
+        /// Releasing its session really closes established traffic.
+        stop_engine_on_disconnect: Mutex<Option<Arc<ppvpn_core::Engine>>>,
         available: AtomicBool,
         connect_error: Mutex<Option<String>>,
         update_error: Mutex<Option<String>>,
@@ -3482,13 +3540,25 @@ mod tests {
                     }
                     return Err(ServiceError::Unavailable("service call timed out".into()));
                 }
-                let mut owner = self.owner.lock().unwrap();
-                if owner.as_ref().is_some_and(|(owned, _)| owned == session) {
-                    *owner = None;
-                    Ok(())
-                } else {
-                    Err(ServiceError::Failed("CONNECTION_NOT_ACTIVE".into()))
+                let released = {
+                    let mut owner = self.owner.lock().unwrap();
+                    if owner.as_ref().is_some_and(|(owned, _)| owned == session) {
+                        *owner = None;
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if !released {
+                    return Err(ServiceError::Failed("CONNECTION_NOT_ACTIVE".into()));
                 }
+                let engine = self.stop_engine_on_disconnect.lock().unwrap().clone();
+                if let Some(engine) = engine {
+                    engine.shutdown().await.map_err(|_| {
+                        ServiceError::Failed("TEST_FORWARDER_SHUTDOWN_FAILED".into())
+                    })?;
+                }
+                Ok(())
             })
         }
 
@@ -4262,9 +4332,9 @@ mod tests {
                 let direct = if direct_down.load(Ordering::SeqCst) {
                     Err(service_unreachable("HEALTH_DIRECT_PATH_FAILED"))
                 } else {
-                    Ok(())
+                    Ok(HealthEndpoint::Healthy)
                 };
-                (direct, Ok(()))
+                Box::pin(async move { (direct, Ok(HealthEndpoint::Healthy)) })
             }
         }));
         h.enhanced.set_health_interval(Duration::from_millis(20));
@@ -4296,10 +4366,12 @@ mod tests {
         h.enhanced.set_profile(PROFILE_R1, "r1").await.unwrap();
         h.enhanced.enable().await.unwrap();
         h.enhanced.set_official_steps(Arc::new(|| {
-            (
-                Err(service_unreachable("HEALTH_DIRECT_PATH_FAILED")),
-                Err(health_error("HEALTH_PROXY_PATH_FAILED")),
-            )
+            Box::pin(async {
+                (
+                    Err(service_unreachable("HEALTH_DIRECT_PATH_FAILED")),
+                    Err(health_error("HEALTH_PROXY_PATH_FAILED")),
+                )
+            })
         }));
         h.enhanced.set_health_interval(Duration::from_millis(20));
         wait_connects_above(&h, 1, "recovered").await;
@@ -4309,15 +4381,19 @@ mod tests {
     fn official_verdicts() {
         let direct = || Err(service_unreachable("HEALTH_DIRECT_PATH_FAILED"));
         let proxied = || Err(health_error("HEALTH_PROXY_PATH_FAILED"));
-        assert_eq!(official_verdict(Ok(()), Ok(())), Ok(()));
-        let only_direct = official_verdict(direct(), Ok(())).unwrap_err();
+        let healthy = || Ok(HealthEndpoint::Healthy);
+        assert_eq!(official_verdict(healthy(), healthy()), Ok(()));
+        let only_direct = official_verdict(direct(), healthy()).unwrap_err();
         assert!(is_api_unreachable(&only_direct), "{only_direct:?}");
         assert_eq!(
             only_direct.detail,
             format!("{API_UNREACHABLE}: HEALTH_DIRECT_PATH_FAILED")
         );
-        assert_eq!(official_verdict(direct(), proxied()), direct());
-        assert_eq!(official_verdict(Ok(()), proxied()), proxied());
+        assert_eq!(official_verdict(direct(), proxied()), direct().map(|_| ()));
+        assert_eq!(
+            official_verdict(healthy(), proxied()),
+            proxied().map(|_| ())
+        );
         assert!(!is_api_unreachable(&direct().unwrap_err()));
         assert!(is_leak(&service_unreachable(
             "HEALTH_CAPTURE_PATH_FAILED: x"
