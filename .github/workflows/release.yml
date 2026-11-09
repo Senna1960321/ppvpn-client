@@ -85,6 +85,10 @@ on:
         description: stable only - run the whole release without publishing anything (a draft release, no tag, no provenance, no upload of the site); on main
         type: boolean
         default: false
+      publish_mobile:
+        description: stable only - also build and upload iOS to TestFlight and Android to Play; disable for a desktop-only hotfix
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -1210,13 +1214,14 @@ jobs:
   # Store Connect key; tools/desktop/ci/ios-signing.sh) and uploads it to
   # TestFlight, where only the internal testers see it. CFBundleVersion is
   # the release's build number, so each upload is new. A dev run builds
-  # nothing for iOS. Its failure stops no other job.
+  # nothing for iOS. A desktop-only stable hotfix can opt out with
+  # publish_mobile=false; main pushes still build it. Its failure stops no other job.
   ios:
     name: ios
     needs: [prepare, approve]
     if: >-
       !cancelled() && needs.prepare.result == 'success' &&
-      (github.event_name == 'push' || (needs.prepare.outputs.channel == 'stable' && needs.approve.result == 'success'))
+      (github.event_name == 'push' || (needs.prepare.outputs.channel == 'stable' && needs.approve.result == 'success' && inputs.publish_mobile))
     runs-on: macos-15
     environment: ${{ needs.prepare.outputs.channel == 'stable' && 'desktop-release-stable' || '' }}
     timeout-minutes: 90
@@ -1303,13 +1308,14 @@ jobs:
   # the stable run's bundle is an artifact for that. Release status:
   # vars.PLAY_RELEASE_STATUS (default completed; draft while the app has
   # never been published). A dev run builds nothing for Android. Its
-  # failure stops no other job.
+  # failure stops no other job. publish_mobile=false skips this job for a
+  # desktop-only stable hotfix; main pushes still build it.
   android:
     name: android
     needs: [prepare, approve]
     if: >-
       !cancelled() && needs.prepare.result == 'success' &&
-      (github.event_name == 'push' || (needs.prepare.outputs.channel == 'stable' && needs.approve.result == 'success'))
+      (github.event_name == 'push' || (needs.prepare.outputs.channel == 'stable' && needs.approve.result == 'success' && inputs.publish_mobile))
     runs-on: ubuntu-latest
     environment: ${{ needs.prepare.outputs.channel == 'stable' && 'desktop-release-stable' || '' }}
     timeout-minutes: 90
