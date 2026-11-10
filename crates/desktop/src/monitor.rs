@@ -104,7 +104,9 @@ impl Client {
         let standard_nodes = standard_status
             .as_ref()
             .and_then(|status| status.nodes.clone());
-        if let (Some(status), Some(node)) = (standard_status, selected.as_deref()) {
+        if let (Some(status), Some(node), Some(transport)) =
+            (standard_status, selected.as_deref(), standard.as_ref())
+        {
             if status.selected_node_id.as_deref() == Some(node) {
                 standard_detail = ConnectionDetail {
                     endpoint_key: status.selected_endpoint_key,
@@ -113,7 +115,19 @@ impl Client {
                     latency_ms: None,
                 };
             } else if status.is_serving() {
-                self.select_standard_node(node).await;
+                // Status RPCs may finish after the user chose another node or
+                // the standard core was replaced. Serialize only the repair
+                // with explicit selection; probes never hold this lock.
+                let _sync = self.cores.lock().await;
+                let same_core = self
+                    .standard
+                    .transport()
+                    .is_ok_and(|current| std::sync::Arc::ptr_eq(transport, &current));
+                if self.session_is(session) && self.selected_node() == selected && same_core {
+                    if let Err(error) = core_ipc::select_node(transport.as_ref(), node).await {
+                        tracing::info!("standard core: select node failed ({})", error.detail());
+                    }
+                }
             }
         }
 
@@ -188,7 +202,7 @@ impl Client {
                 ..standard_detail
             },
         };
-        if !self.session_is(session) {
+        if !self.session_is(session) || self.selected_node() != selected {
             return;
         }
         self.set_connection_detail(detail);
@@ -254,3 +268,6 @@ mod tests {
         assert!(!latency_fresh(&None, "a", now));
     }
 }
+
+#[cfg(test)]
+mod selection_tests;

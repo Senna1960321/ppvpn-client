@@ -1319,6 +1319,9 @@ impl Client {
     }
 
     pub(crate) async fn choose_node(&self, node_id: String) -> Result<(), ClientError> {
+        // Order explicit choices after any monitor repair already in flight.
+        // Validate the session and node only after this wait.
+        let _sync = self.cores.lock().await;
         let session = self.current_session()?;
         if !self
             .session_state()
