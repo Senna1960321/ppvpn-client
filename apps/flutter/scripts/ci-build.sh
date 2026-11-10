@@ -311,6 +311,7 @@ grep -q '^mod frb_generated;' rust/src/lib.rs || echo 'mod frb_generated;' >> ru
 # Analysis once per pull request, in ci.yml's Linux flutter job: the
 # others set PPVPN_SKIP_ANALYZE=1 (#459).
 if [ "${PPVPN_SKIP_ANALYZE:-}" != 1 ]; then
+  flutter test checks/probe_batch_test.dart
   flutter analyze --no-fatal-infos
 fi
 
