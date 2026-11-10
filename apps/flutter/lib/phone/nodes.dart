@@ -93,6 +93,9 @@ class _PhoneNodesState extends State<PhoneNodes> {
           for (final node in nodes)
             if ((node.exitRegion ?? '').isNotEmpty) node.exitRegion!,
         }.toList();
+        // A refreshed profile can remove the selected region. Clear it before
+        // the single-region layout hides the controls for changing it.
+        if (_region != null && !regions.contains(_region)) _region = null;
         final query = _query.trim().toLowerCase();
         final shown = [
           for (final node in nodes)

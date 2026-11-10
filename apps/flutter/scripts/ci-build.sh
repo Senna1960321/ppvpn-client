@@ -312,6 +312,7 @@ grep -q '^mod frb_generated;' rust/src/lib.rs || echo 'mod frb_generated;' >> ru
 # others set PPVPN_SKIP_ANALYZE=1 (#459).
 if [ "${PPVPN_SKIP_ANALYZE:-}" != 1 ]; then
   flutter analyze --no-fatal-infos
+  flutter test checks/phone_region_test.dart
 fi
 
 lib="$root/target/release"
