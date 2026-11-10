@@ -238,13 +238,22 @@ impl Compat {
 
     /// While connected: after a standard-core restart the endpoint comes up
     /// disabled (and possibly on another port); re-enable it and rewrite the
-    /// OS settings when the port moved.
+    /// OS settings when the port moved, only while the previous endpoint is
+    /// still ours.
     pub(crate) async fn reconcile(&self) {
         let inner = &self.inner;
         let Ok(_operation) = inner.operation.try_lock() else {
             return;
         };
         if inner.with_data(|data| data.state.phase) != ConnectionPhase::On {
+            return;
+        }
+        let Some(previous) = inner.with_data(|data| data.endpoint.clone()) else {
+            return;
+        };
+        // Check the endpoint we last wrote, before enabling its replacement.
+        // A failed query also leaves the OS settings alone until a later tick.
+        if !inner.check_ownership(&previous).await {
             return;
         }
         let Ok(transport) = inner.standard.transport() else {
@@ -267,9 +276,12 @@ impl Compat {
                 }
             },
         };
-        let previous = inner.with_data(|data| data.endpoint.clone());
-        if previous.as_ref() == Some(&current) {
-            inner.check_ownership(&current).await;
+        if previous == current {
+            return;
+        }
+        // Core IPC can take time: another app may have taken over while
+        // status or re-enable was pending. Recheck before moving the OS proxy.
+        if !inner.check_ownership(&previous).await {
             return;
         }
         tracing::info!(
@@ -378,15 +390,15 @@ impl Inner {
     /// app took the system proxy over. Its settings stay (the backup is
     /// dropped), the endpoint is disabled and compatible mode ends in
     /// `Error` naming that app when it can be told. A failed check changes
-    /// nothing (the next tick retries).
-    async fn check_ownership(&self, endpoint: &(String, u16)) {
+    /// nothing (the next tick retries). Only confirmed ownership returns true.
+    async fn check_ownership(&self, endpoint: &(String, u16)) -> bool {
         let writer = self.writer.clone();
         let Ok(Ok(proxies)) = tokio::task::spawn_blocking(move || writer.current_proxies()).await
         else {
-            return;
+            return false;
         };
         if crate::sysproxy::points_at(&proxies, &endpoint.0, endpoint.1) {
-            return;
+            return true;
         }
         let now = proxies.first().cloned();
         let owner = match &now {
@@ -419,6 +431,7 @@ impl Inner {
             )),
             true,
         );
+        false
     }
 
     /// [`Compat::clear_stale_proxy`] without the lock and phase check.
@@ -693,3 +706,7 @@ mod tests {
         assert!(backup.endpoint.is_none());
     }
 }
+
+#[cfg(test)]
+#[path = "compat/reconcile_tests.rs"]
+mod reconcile_tests;
